@@ -1,0 +1,13 @@
+name = "fitbit-health-tracker"
+main = "src/index.ts"
+compatibility_date = "2023-10-02"
+
+kv_namespaces = [
+  { binding = "FITBIT_KV", id = "xxx_kv_id_placeholder_xxx" }
+]
+
+[vars]
+FITBIT_CLIENT_ID = "replace_me"
+FITBIT_CLIENT_SECRET = "replace_me"
+FITBIT_REDIRECT_URL = "http://localhost:8787/fitbit/callback"
+APP_BASE_URL = "http://localhost:8787"
