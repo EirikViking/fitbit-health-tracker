@@ -1,80 +1,81 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fitbit Health Tracker</title>
-  <style>
-    body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-    h1 { color: #333; }
-    .card { border: 1px solid #eee; padding: 1rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 1rem; }
-    .stat { font-size: 1.2rem; margin: 0.5rem 0; }
-    .btn { display: inline-block; background: #0070f3; color: white; padding: 0.8rem 1.5rem; text-decoration: none; border-radius: 4px; font-weight: bold; }
-    .btn:hover { background: #005bb5; }
-    .hidden { display: none; }
-    #error { color: red; margin-top: 1rem; }
-  </style>
+  <title>Fitbit Health Dashboard</title>
+  <link rel="stylesheet" href="/app.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
+
 <body>
-  <h1>Fitbit Health Tracker</h1>
-  
-  <div id="connect-section" class="hidden">
-    <p>Connect your Fitbit account to see your daily stats.</p>
-    <a href="/fitbit/auth" class="btn">Connect Fitbit</a>
-  </div>
 
-  <div id="dashboard-section" class="hidden">
-    <div class="card">
-      <div id="date" style="color: #666; font-size: 0.9rem; margin-bottom: 0.5rem;"></div>
-      <div class="stat">🏃 Steps: <strong id="steps">--</strong></div>
-      <div class="stat">🔥 Calories: <strong id="calories">--</strong></div>
-      <div class="stat">📏 Distance: <strong id="distance">--</strong> km</div>
+  <div class="container">
+    <header>
+      <h1>Fitbit Health</h1>
+      <div>
+        <span id="syncStatus" class="sync-status"></span>
+        <button id="syncBtn" class="btn">
+          <span class="icon">🔄</span> Sync Now
+        </button>
+      </div>
+    </header>
+
+    <div id="connectSection" class="connect-prompt hidden">
+      <h2>Welcome Back</h2>
+      <p style="color: var(--text-secondary); margin: 1rem 0 2rem;">Connect your Fitbit account to visualize your health
+        trends.</p>
+      <a href="/fitbit/auth" class="btn">Connect Fitbit Account</a>
     </div>
-    <button onclick="loadData()" style="padding: 0.5rem 1rem;">Refresh</button>
+
+    <div id="dashboardSection" class="hidden">
+      <div class="dashboard-grid">
+        <div class="card">
+          <div class="card-title">Resting Heart Rate <span style="font-size:0.8rem">30 Days</span></div>
+          <canvas id="chartHR"></canvas>
+        </div>
+        <div class="card">
+          <div class="card-title">Sleep Duration <span style="font-size:0.8rem">hrs</span></div>
+          <canvas id="chartSleep"></canvas>
+        </div>
+        <div class="card">
+          <div class="card-title">HRV (RMSSD) <span style="font-size:0.8rem">ms</span></div>
+          <canvas id="chartHRV"></canvas>
+        </div>
+      </div>
+
+      <!-- Quick Stats Tests -->
+      <!-- <div class="card" style="margin-top: 2rem;">
+        <h3>Today (Quick View)</h3>
+        <div id="todaySummary" class="metric-grid"></div>
+      </div> -->
+
+    </div>
   </div>
-  
-  <div id="error"></div>
 
-  <script>
-    async function loadData() {
-      const errorDiv = document.getElementById('error');
-      const connectSec = document.getElementById('connect-section');
-      const dashSec = document.getElementById('dashboard-section');
-      
-      errorDiv.textContent = '';
-      
-      try {
-        const res = await fetch('/api/today');
-        
-        if (res.status === 401) {
-          connectSec.classList.remove('hidden');
-          dashSec.classList.add('hidden');
-          return;
-        }
-        
-        if (!res.ok) {
-          throw new Error('Failed to fetch data');
-        }
+  <!-- Day Details Modal -->
+  <div id="dayModal" class="modal-overlay">
+    <div class="modal-content">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+        <h2 id="modalDate"></h2>
+        <button id="closeModal" class="btn-secondary" style="padding:0.4rem 0.8rem;">✕</button>
+      </div>
 
-        const data = await res.json();
-        const summary = data.summary;
+      <div id="modalMetrics" class="metric-grid">
+        <!-- Injected via JS -->
+      </div>
 
-        document.getElementById('date').textContent = summary.date;
-        document.getElementById('steps').textContent = summary.steps.toLocaleString();
-        document.getElementById('calories').textContent = summary.caloriesOut.toLocaleString();
-        document.getElementById('distance').textContent = summary.distanceKm.toFixed(2);
+      <div id="modalRaw"
+        style="font-family: monospace; font-size: 0.8rem; background: #eee; padding: 1rem; border-radius: 8px; overflow-x: auto; display: none;">
+      </div>
+    </div>
+  </div>
 
-        connectSec.classList.add('hidden');
-        dashSec.classList.remove('hidden');
+  <div id="toastBucket" class="toast-container"></div>
 
-      } catch (err) {
-        console.error(err);
-        errorDiv.textContent = err.message || 'An error occurred';
-      }
-    }
-
-    // Load on start
-    loadData();
-  </script>
+  <script src="/app.js"></script>
 </body>
+
 </html>

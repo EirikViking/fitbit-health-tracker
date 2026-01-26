@@ -1,0 +1,174 @@
+:root {
+  --primary-color: #0070f3;
+  --primary-hover: #005bb5;
+  --bg-color: #f7f9fc;
+  --card-bg: #ffffff;
+  --text-main: #111;
+  --text-secondary: #666;
+  --border-color: #eaeaea;
+  --success-color: #10b981;
+  --error-color: #ef4444;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.05), 0 10px 15px rgba(0,0,0,0.02);
+  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --radius: 12px;
+}
+
+@media (modules-color-scheme: dark) {
+  :root {
+    --bg-color: #111;
+    --card-bg: #1c1c1c;
+    --text-main: #fff;
+    --text-secondary: #aaa;
+    --border-color: #333;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  line-height: 1.6;
+  padding: 1rem;
+}
+
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+/* Header */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  padding: 1rem 0;
+}
+
+h1 { font-size: 1.5rem; font-weight: 700; }
+
+.sync-status { font-size: 0.9rem; color: var(--text-secondary); margin-right: 1rem; }
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary-color);
+  color: white;
+  padding: 0.6rem 1.2rem;
+  text-decoration: none;
+  border-radius: var(--radius);
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.btn:hover { background: var(--primary-hover); }
+.btn:active { transform: scale(0.98); }
+.btn-secondary { background: transparent; border: 1px solid var(--border-color); color: var(--text-main); }
+.btn-secondary:hover { background: rgba(0,0,0,0.05); }
+
+/* Dashboard Grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s;
+}
+.card:hover { box-shadow: var(--shadow-md); }
+
+.card-title { font-size: 1rem; color: var(--text-secondary); margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; }
+
+canvas { width: 100% !important; height: 250px !important; }
+
+/* Modal / Overlay */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 100;
+  backdrop-filter: blur(2px);
+}
+.modal-overlay.open { opacity: 1; pointer-events: auto; }
+
+.modal-content {
+  background: var(--card-bg);
+  padding: 2rem;
+  border-radius: var(--radius);
+  width: 90%;
+  max-width: 500px;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-md);
+  transform: translateY(10px);
+  transition: transform 0.2s;
+}
+.modal-overlay.open .modal-content { transform: translateY(0); }
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.metric-box {
+  background: rgba(0,0,0,0.03);
+  padding: 1rem;
+  border-radius: 8px;
+}
+.metric-label { font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+.metric-value { font-size: 1.25rem; font-weight: 700; margin-top: 0.25rem; }
+
+/* Utility */
+.hidden { display: none !important; }
+.text-error { color: var(--error-color); }
+
+/* Toast */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 200;
+}
+.toast {
+  background: var(--text-main);
+  color: var(--bg-color);
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  margin-top: 0.5rem;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  animation: slideIn 0.3s forwards;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.connect-prompt {
+  text-align: center;
+  padding: 4rem 1rem;
+}

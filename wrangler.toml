@@ -13,3 +13,7 @@ d1_databases = [
 [triggers]
 crons = ["15 1 * * *"]
 
+[assets]
+directory = "./public"
+binding = "ASSETS"
+

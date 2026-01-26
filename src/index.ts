@@ -108,7 +108,7 @@ export default {
         }
 
         try {
-            if (url.pathname === "/") return new Response(INDEX_HTML, { headers: { "Content-Type": "text/html" } });
+
             if (url.pathname === "/health") return new Response(JSON.stringify({ version: "1.0.0" }), { headers: { "Content-Type": "application/json" } });
             if (url.pathname === "/fitbit/auth") return handleAuth(request, env);
             if (url.pathname === "/fitbit/callback") return handleCallback(request, env);
