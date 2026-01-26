@@ -52,7 +52,20 @@ A minimal Cloudflare Worker app to track Fitbit daily stats using OAuth 2.0.
 - `GET /api/activity/today`: Extended activity stats + AZM
 - `GET /api/activity/timeseries?days=30`: 30-day history of steps, cal, dist, azm
 - `GET /api/hrv/today`: HRV summary
+- `GET /api/history`: Returns D1 historical metrics (default 30 days)
+- `GET /api/day?date=YYYY-MM-DD`: Returns full metrics for a specific date from D1
+- `POST /api/sync`: Manually triggers a sync for today and yesterday
 - `GET /health`: Health check
+
+## D1 & Cron
+- **Database**: Stores daily metrics in `daily_metrics` table.
+- **Cron**: Runs every day at 01:15 UTC to sync "today" and "yesterday" (to capture late syncs).
+- **Manual Sync**: `curl -X POST /api/sync`
+
+### Local D1 Setup
+```bash
+npx wrangler d1 migrations apply FITBIT_DB --local
+```
 
 ## Deployment
 

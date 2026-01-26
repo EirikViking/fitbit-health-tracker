@@ -1,6 +1,7 @@
 
 export interface Env {
     FITBIT_KV: KVNamespace;
+    FITBIT_DB: D1Database;
     FITBIT_CLIENT_ID: string;
     FITBIT_CLIENT_SECRET: string;
     FITBIT_REDIRECT_URL: string;
@@ -364,6 +365,162 @@ async function handleHRVToday(req: Request, env: Env): Promise<Response> {
 
     return jsonResponse(env, { summary: stats });
 }
+
+// --- Phase 2B: D1 Handlers & Sync ---
+
+async function handleSyncTrigger(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    const today = new Date().toISOString().split('T')[0];
+    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
+    // We await here since it's an explicit user trigger
+    await Promise.all([syncDay(env, today), syncDay(env, yesterday)]);
+
+    return jsonResponse(env, { ok: true, synced: [yesterday, today] });
+}
+
+async function handleHistory(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+    const rangeDays = parseInt(url.searchParams.get("days") || "30");
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (rangeDays - 1));
+
+    const endStr = end.toISOString().split('T')[0];
+    const startStr = start.toISOString().split('T')[0];
+
+    const { results } = await env.FITBIT_DB.prepare(
+        "SELECT * FROM daily_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC"
+    ).bind(startStr, endStr).all();
+
+    const series = (results || []).map((r: any) => ({
+        date: r.date,
+        steps: r.steps,
+        caloriesOut: r.calories_out,
+        distanceKm: r.distance_km,
+        azm: r.azm,
+        restingHr: r.resting_hr,
+        hrvRmssd: r.hrv_rmssd,
+        sleepMinutes: r.sleep_minutes
+    }));
+
+    return jsonResponse(env, {
+        range: { start: startStr, end: endStr, days: rangeDays },
+        series
+    });
+}
+
+async function handleDay(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+    const date = url.searchParams.get("date");
+    if (!date) return new Response("Missing date", { status: 400 });
+
+    const row: any = await env.FITBIT_DB.prepare(
+        "SELECT * FROM daily_metrics WHERE date = ?"
+    ).bind(date).first();
+
+    if (!row) return jsonResponse(env, { date, metrics: null });
+
+    return jsonResponse(env, {
+        date,
+        metrics: {
+            steps: row.steps,
+            caloriesOut: row.calories_out,
+            distanceKm: row.distance_km,
+            floors: row.floors,
+            azm: row.azm,
+            restingHr: row.resting_hr,
+            avgHr: row.avg_hr,
+            maxHr: row.max_hr,
+            hrvRmssd: row.hrv_rmssd,
+            hrvCoverage: row.hrv_coverage,
+            sleepMinutes: row.sleep_minutes,
+            sleepTimeInBed: row.sleep_time_in_bed,
+            sleepEfficiency: row.sleep_efficiency,
+            sleepDeep: row.sleep_deep,
+            sleepLight: row.sleep_light,
+            sleepRem: row.sleep_rem,
+            sleepWake: row.sleep_wake,
+            updatedAt: row.updated_at
+        }
+    });
+}
+
+// Logic to fetch all raw data and upsert into D1
+async function syncDay(env: Env, date: string) {
+    const [actRes, azmRes, sleepRes, heartRes, hrvRes] = await Promise.all([
+        fetchFitbitJSON(env, `/activities/date/${date}.json`),
+        fetchFitbitJSON(env, `/activities/active-zone-minutes/date/${date}.json`),
+        fetchFitbitJSON(env, `/sleep/date/${date}.json`),
+        fetchFitbitJSON(env, `/activities/heart/date/${date}/1d.json`),
+        fetchFitbitJSON(env, `/hrv/date/${date}.json`)
+    ]);
+
+    // Parse Activity
+    const summary = actRes.data?.summary || {};
+    const steps = summary.steps || 0;
+    const caloriesOut = summary.caloriesOut || 0;
+    const floors = summary.floors || 0;
+    const distanceKm = summary.distances?.find((d: any) => d.activity === "total")?.distance || 0;
+
+    // Parse AZM
+    const azmList = azmRes.data?.["activities-active-zone-minutes"];
+    const azm = (azmList && azmList[0]?.value?.activeZoneMinutes) || 0;
+
+    // Parse Heart
+    let restingHr = 0, avgHr = 0, maxHr = 0; // Avg/max not readily available in summary, default 0
+    if (heartRes.ok && heartRes.data?.["activities-heart"]?.[0]?.value) {
+        const val = heartRes.data["activities-heart"][0].value;
+        restingHr = val.restingHeartRate || 0;
+        // If we had intraday we could calc avg, but keeping simpe
+    }
+
+    // Parse HRV
+    let hrvRmssd = 0, hrvCoverage = 0;
+    if (hrvRes.ok && hrvRes.data?.hrv?.[0]) {
+        hrvRmssd = hrvRes.data.hrv[0].value?.dailyRmssd || 0;
+    }
+
+    // Parse Sleep
+    let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
+    let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
+    if (sleepRes.ok && sleepRes.data?.sleep?.length > 0) {
+        const s = sleepRes.data.sleep.find((x: any) => x.isMainSleep) || sleepRes.data.sleep[0];
+        sleepMinutes = s.minutesAsleep || 0;
+        timeInBed = s.timeInBed || 0;
+        efficiency = s.efficiency || 0;
+        if (s.levels?.summary) {
+            sDeep = s.levels.summary.deep?.minutes || 0;
+            sLight = s.levels.summary.light?.minutes || 0;
+            sRem = s.levels.summary.rem?.minutes || 0;
+            sWake = s.levels.summary.wake?.minutes || 0;
+        }
+    }
+
+    await env.FITBIT_DB.prepare(`
+        INSERT INTO daily_metrics (
+            date, steps, calories_out, distance_km, floors, azm, 
+            resting_hr, avg_hr, max_hr, hrv_rmssd, hrv_coverage,
+            sleep_minutes, sleep_time_in_bed, sleep_efficiency,
+            sleep_deep, sleep_light, sleep_rem, sleep_wake, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            steps=excluded.steps, calories_out=excluded.calories_out, distance_km=excluded.distance_km,
+            floors=excluded.floors, azm=excluded.azm, resting_hr=excluded.resting_hr,
+            hrv_rmssd=excluded.hrv_rmssd, sleep_minutes=excluded.sleep_minutes,
+            sleep_time_in_bed=excluded.sleep_time_in_bed, sleep_efficiency=excluded.sleep_efficiency,
+            sleep_deep=excluded.sleep_deep, sleep_light=excluded.sleep_light,
+            sleep_rem=excluded.sleep_rem, sleep_wake=excluded.sleep_wake, updated_at=excluded.updated_at
+    `).bind(
+        date, steps, caloriesOut, distanceKm, floors, azm,
+        restingHr, avgHr, maxHr, hrvRmssd, hrvCoverage,
+        sleepMinutes, timeInBed, efficiency,
+        sDeep, sLight, sRem, sWake, new Date().toISOString()
+    ).run();
+}
+
+
 
 // --- Shared Helpers ---
 
