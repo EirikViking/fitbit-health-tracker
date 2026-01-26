@@ -16,10 +16,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     loadDashboard();
+    pollBackfillStatus();
 });
 
 // Period toggle function
-window.setPeriod = function(period) {
+window.setPeriod = function (period) {
     currentPeriod = period;
     document.querySelectorAll("#periodToggle [data-period]").forEach(btn => {
         btn.classList.toggle("active", btn.dataset.period === period);
@@ -463,4 +464,125 @@ function showToast(msg, type = 'info') {
     div.textContent = msg;
     $('toastBucket').appendChild(div);
     setTimeout(() => div.remove(), 4000);
+}
+
+
+// --- Backfill Polling ---
+async function pollBackfillStatus() {
+
+    const fetchStatus = async () => {
+        try {
+            const res = await fetch('/api/backfill/plan/status');
+            if (!res.ok) return 60000;
+            const data = await res.json();
+            renderBackfillCard(data);
+
+            // Determine next poll interval
+            if (data.progress?.running) return 5000;
+            if (data.plan?.active || (data.progress?.failedDays && data.progress.failedDays.length > 0)) return 15000;
+            return 60000;
+        } catch (e) {
+            console.error("Backfill poll error", e);
+            return 60000;
+        }
+    };
+
+    const run = async () => {
+        const interval = await fetchStatus();
+        setTimeout(run, interval);
+    };
+
+    run();
+}
+
+function renderBackfillCard(data) {
+    try {
+        const card = $('backfillCard');
+        if (!card) return;
+        const { plan, progress, estimatedRemainingDays, lastUpdatedAt } = data;
+
+        if ((!plan || !plan.active) && (!progress || !progress.running)) {
+            // Only show if there is something interesting
+            // If totally idle and empty, maybe hide?
+            // User requirement: "Working when progress.running true... Scheduled... Idle otherwise"
+            // We should show it if plan is present OR progress is present
+        }
+
+        if (!plan && !progress) {
+            card.classList.add('hidden');
+            return;
+        }
+        card.classList.remove('hidden');
+
+        // Mappings
+        const isRunning = progress?.running;
+        const isActive = plan?.active;
+        const failedDays = progress?.failedDays || [];
+        const hasFailed = failedDays.length > 0;
+
+        // Status Text & Badge
+        const statusEl = $('bf-status-text');
+        let status = "Idle";
+        statusEl.className = "status-badge";
+
+        if (isRunning) {
+            status = "Working";
+            statusEl.classList.add('running');
+        } else if (hasFailed) {
+            // Check if retry scheduled
+            const nextRetry = failedDays[0].nextRetryAt;
+            if (nextRetry && new Date(nextRetry) > new Date()) {
+                status = "Retry Scheduled";
+                statusEl.classList.add('scheduled');
+            } else {
+                status = "Error / Retrying";
+                statusEl.classList.add('retry');
+            }
+        } else if (isActive) {
+            status = "Scheduled";
+            statusEl.classList.add('scheduled');
+        }
+        statusEl.textContent = status;
+
+        // Stats
+        $('bf-target-since').textContent = plan?.targetSince || "--";
+        $('bf-from').textContent = progress?.from || "--";
+        $('bf-to').textContent = progress?.to || "--";
+        $('bf-last-date').textContent = progress?.lastProcessedDate || "--";
+        $('bf-processed').textContent = progress?.processedDays ?? 0;
+        $('bf-total').textContent = progress?.totalDays ?? 0;
+        $('bf-remaining').textContent = estimatedRemainingDays ?? "--";
+
+        if (lastUpdatedAt) {
+            $('bf-updated-at').textContent = `Updated: ${new Date(lastUpdatedAt).toLocaleTimeString()}`;
+        }
+
+        // Progress Bar
+        if (progress && progress.totalDays > 0) {
+            const pct = Math.min(100, Math.round((progress.processedDays / progress.totalDays) * 100));
+            $('bf-progress-bar').style.width = pct + "%";
+        } else {
+            $('bf-progress-bar').style.width = '0%';
+        }
+
+        // Error Section
+        const errSec = $('bf-error-section');
+        if (hasFailed) {
+            errSec.classList.remove('hidden');
+            const err = failedDays[0];
+            $('bf-error-type').textContent = err.errorType || "unknown";
+            $('bf-error-msg').textContent = err.errorMessage || "--";
+            $('bf-error-date').textContent = err.date || "--";
+            const retryRow = $('bf-next-retry-row');
+            if (err.nextRetryAt) {
+                retryRow.classList.remove('hidden');
+                const date = new Date(err.nextRetryAt);
+                $('bf-next-retry').textContent = date.toLocaleTimeString();
+            } else {
+                retryRow.classList.add('hidden');
+            }
+        } else {
+            errSec.classList.add('hidden');
+        }
+    } catch (e) { console.warn("Backfill UI Error", e); }
 }

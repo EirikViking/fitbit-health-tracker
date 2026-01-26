@@ -58,6 +58,64 @@
         <div id="todaySummary" class="metric-grid"></div>
       </div> -->
 
+      <!-- Backfill Progress Card -->
+      <div id="backfillCard" class="card hidden" style="margin-top: 2rem;">
+        <div class="card-title">
+          <span>Backfill Progress</span>
+          <span id="bf-status-text" class="status-badge">Idle</span>
+        </div>
+
+        <div class="backfill-stats">
+          <div class="bf-row">
+            <span class="bf-label">Target Since</span>
+            <span id="bf-target-since" class="bf-value">--</span>
+          </div>
+          <div class="bf-row">
+            <span class="bf-label">Processed Range</span>
+            <span class="bf-value"><span id="bf-from">--</span> to <span id="bf-to">--</span></span>
+          </div>
+          <div class="bf-row">
+            <span class="bf-label">Last Date</span>
+            <span id="bf-last-date" class="bf-value">--</span>
+          </div>
+          <div class="bf-row">
+            <span class="bf-label">Progress</span>
+            <span class="bf-value"><span id="bf-processed">0</span> / <span id="bf-total">0</span> days</span>
+          </div>
+          <div class="bf-row">
+            <span class="bf-label">Est. Remaining</span>
+            <span id="bf-remaining" class="bf-value">--</span>
+          </div>
+        </div>
+
+        <div class="progress-bar-bg">
+          <div id="bf-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+        </div>
+
+        <div id="bf-error-section" class="bf-error hidden">
+          <div class="bf-row">
+            <span class="bf-label" style="color:var(--error-color)">Error</span>
+            <span id="bf-error-type" class="bf-value">--</span>
+          </div>
+          <div class="bf-row">
+            <span class="bf-label">Message</span>
+            <span id="bf-error-msg" class="bf-value">--</span>
+          </div>
+          <div id="bf-next-retry-row" class="bf-row hidden">
+            <span class="bf-label">Retry At</span>
+            <span id="bf-next-retry" class="bf-value">--</span>
+          </div>
+          <div class="bf-row">
+            <span class="bf-label">Failed Date</span>
+            <span id="bf-error-date" class="bf-value">--</span>
+          </div>
+        </div>
+
+        <div class="bf-footer">
+          <span id="bf-updated-at">Updated: --</span>
+        </div>
+      </div>
+
     </div>
   </div>
 
