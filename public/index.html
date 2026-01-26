@@ -23,6 +23,12 @@
       </div>
     </header>
 
+    <div id="periodToggle" class="period-toggle">
+      <button class="btn-secondary active" data-period="daily" onclick="setPeriod('daily')">Daily</button>
+      <button class="btn-secondary" data-period="weekly" onclick="setPeriod('weekly')">Weekly</button>
+      <button class="btn-secondary" data-period="monthly" onclick="setPeriod('monthly')">Monthly</button>
+    </div>
+
     <div id="connectSection" class="connect-prompt hidden">
       <h2>Welcome Back</h2>
       <p style="color: var(--text-secondary); margin: 1rem 0 2rem;">Connect your Fitbit account to visualize your health

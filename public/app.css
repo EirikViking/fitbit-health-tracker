@@ -74,6 +74,15 @@ h1 { font-size: 1.5rem; font-weight: 700; }
 .btn:active { transform: scale(0.98); }
 .btn-secondary { background: transparent; border: 1px solid var(--border-color); color: var(--text-main); }
 .btn-secondary:hover { background: rgba(0,0,0,0.05); }
+.btn-secondary.active { font-weight: 600; }
+
+/* Period Toggle */
+.period-toggle {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin: 10px 0 0;
+}
 
 /* Dashboard Grid */
 .dashboard-grid {
