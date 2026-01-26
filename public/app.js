@@ -39,6 +39,13 @@ window.switchTab = function (tabName) {
     document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tab === tabName);
     });
+
+    // Resize charts if they are in the visible tab
+    if (tabName === 'sleep' && charts.sleep) charts.sleep.resize();
+    if (tabName === 'recovery') {
+        if (charts.hr) charts.hr.resize();
+        if (charts.hrv) charts.hrv.resize();
+    }
 };
 
 // Data normalization
@@ -253,6 +260,9 @@ async function loadDashboard() {
 
         renderCharts();
         renderKPIs(data);
+        renderSleepTab(data);
+        renderRecoveryTab(data);
+        renderActivityTab(data);
 
         // Update status
         if (series.length > 0) {
@@ -693,4 +703,187 @@ function renderKPIs(data) {
         renderCard('Sleep Duration', last.sleepMinutes ? last.sleepMinutes / 60 : 0, 'hrs', 'sleepMinutes', true),
         renderCard('HRV (RMSSD)', last.hrvRmssd, 'ms', 'hrvRmssd', true)
     ].join('');
+}
+
+function renderSleepTab(data) {
+    const container = $('sleepMetrics');
+    if (!container || !data.series) return;
+    const series = [...data.series].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const recent = series.slice(-7);
+    const prior = series.slice(-14, -7);
+
+    // 1. Weekly Averages
+    const avgCurr = calculateAvg(recent, 'sleepMinutes');
+    const avgPrev = calculateAvg(prior, 'sleepMinutes');
+
+    let trendHtml = '<span class="text-xs">No trend data</span>';
+    if (avgCurr !== null && avgPrev !== null) {
+        const diff = avgCurr - avgPrev;
+        const symbol = diff > 0 ? '↑' : (diff < 0 ? '↓' : '→');
+        const color = diff > 0 ? 'trend-up' : 'trend-down';
+        trendHtml = `<span class="${color}">${symbol} ${Math.abs(diff / 60).toFixed(1)}h vs last week</span>`;
+    }
+
+    // 2. Consistency (Std Dev)
+    const validSleep = series.slice(-14).filter(d => d.sleepMinutes > 0).map(d => d.sleepMinutes);
+    let consistencyLabel = 'Insufficient data';
+    let badgeClass = 'badge-neutral';
+
+    if (validSleep.length >= 5) {
+        const mean = validSleep.reduce((a, b) => a + b, 0) / validSleep.length;
+        const variance = validSleep.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / validSleep.length;
+        const stdDev = Math.sqrt(variance);
+
+        // Thresholds in mins: <45 High, <90 Med, >90 Low
+        if (stdDev < 45) { consistencyLabel = 'High Consistency'; badgeClass = 'badge-high'; }
+        else if (stdDev < 90) { consistencyLabel = 'Medium Consistency'; badgeClass = 'badge-med'; }
+        else { consistencyLabel = 'Low Consistency'; badgeClass = 'badge-low'; }
+
+        consistencyLabel += ` (±${Math.round(stdDev)}m)`;
+    }
+
+    // 3. Best/Worst (Last 14 days)
+    const last14 = series.slice(-14).filter(d => d.sleepMinutes > 0);
+    let bestWorstHtml = '<div class="text-sm">Not enough data</div>';
+    if (last14.length > 0) {
+        const max = last14.reduce((p, c) => p.sleepMinutes > c.sleepMinutes ? p : c);
+        const min = last14.reduce((p, c) => p.sleepMinutes < c.sleepMinutes ? p : c);
+        bestWorstHtml = `
+            <div class="stat-block">
+                <span class="text-sm">Best: <strong>${(max.sleepMinutes / 60).toFixed(1)}h</strong> <span class="text-xs">(${max.date})</span></span>
+                <span class="text-sm">Worst: <strong>${(min.sleepMinutes / 60).toFixed(1)}h</strong> <span class="text-xs">(${min.date})</span></span>
+            </div>
+        `;
+    }
+
+    container.innerHTML = `
+        <div class="kpi-card">
+            <div class="kpi-title">7-Day Avg Sleep</div>
+            <div class="kpi-value">${avgCurr ? (avgCurr / 60).toFixed(1) : '--'} <span style="font-size:1rem;color:#666">hrs</span></div>
+            <div class="kpi-meta">${trendHtml}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Sleep Consistency</div>
+            <div style="margin-top:0.5rem"><span class="badge ${badgeClass}">${consistencyLabel}</span></div>
+            <div class="text-xs" style="margin-top:0.5rem">Based on var. over last 14 days</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Records (14d)</div>
+            ${bestWorstHtml}
+        </div>
+    `;
+}
+
+function renderRecoveryTab(data) {
+    const container = $('recoveryMetrics');
+    if (!container || !data.series) return;
+    const series = [...data.series].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const recent = series.slice(-7);
+    const prior = series.slice(-14, -7);
+
+    const rhrCurr = calculateAvg(recent, 'restingHr');
+    const rhrPrev = calculateAvg(prior, 'restingHr');
+    const hrvCurr = calculateAvg(recent, 'hrvRmssd');
+    const hrvPrev = calculateAvg(prior, 'hrvRmssd');
+
+    if (!rhrCurr || !hrvCurr) {
+        container.innerHTML = '<p class="text-sm">Recovery data incomplete.</p>';
+        return;
+    }
+
+    // Recovery Badge
+    // Recovered: HRV Up, RHR Down
+    // Strained: HRV Down, RHR Up
+    let status = 'Neutral';
+    let badgeClass = 'badge-neutral';
+    let insight = 'Stable recovery signals.';
+
+    // Simple trends
+    const hrvUp = hrvPrev ? hrvCurr > hrvPrev : false;
+    const rhrDown = rhrPrev ? rhrCurr < rhrPrev : false;
+    const hrvDown = hrvPrev ? hrvCurr < hrvPrev : false;
+    const rhrUp = rhrPrev ? rhrCurr > rhrPrev : false;
+
+    if (hrvUp && rhrDown) {
+        status = 'Recovered';
+        badgeClass = 'badge-recovered';
+        insight = 'Great signs! HRV is up and RHR is down.';
+    } else if (hrvDown && rhrUp) {
+        status = 'Strained';
+        badgeClass = 'badge-strained';
+        insight = 'Body may be under stress (HRV down, RHR up).';
+    } else if (hrvUp) {
+        insight = 'HRV is trending positively.';
+    } else if (rhrDown) {
+        insight = 'Resting heart rate is improving.';
+    }
+
+    container.innerHTML = `
+        <div class="kpi-card">
+            <div class="kpi-title">Weekly Recovery</div>
+            <div style="margin-top:0.5rem"><span class="badge ${badgeClass}">${status}</span></div>
+            <div class="text-sm" style="margin-top:0.5rem">${insight}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Avg RHR (7d)</div>
+            <div class="kpi-value">${Math.round(rhrCurr)} <span class="text-sm">bpm</span></div>
+            <div class="kpi-meta text-xs">vs ${rhrPrev ? Math.round(rhrPrev) : '--'} prev week</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Avg HRV (7d)</div>
+            <div class="kpi-value">${Math.round(hrvCurr)} <span class="text-sm">ms</span></div>
+            <div class="kpi-meta text-xs">vs ${hrvPrev ? Math.round(hrvPrev) : '--'} prev week</div>
+        </div>
+    `;
+}
+
+function renderActivityTab(data) {
+    const container = $('activityMetrics');
+    if (!container || !data.series) return;
+
+    // Check if we have activity fields in the most recent valid record
+    const valid = data.series.find(d => d.steps > 0 || d.caloriesOut > 0);
+
+    if (!valid) {
+        container.innerHTML = `
+            <div class="card" style="grid-column:1/-1; text-align:center; padding:3rem;">
+                <h3>Activity data is limited</h3>
+                <p class="text-sm" style="margin-top:1rem">Connect more Fitbit permissions to unlock steps, calories, and active minutes.</p>
+            </div>
+        `;
+        return;
+    }
+
+    const series = [...data.series].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const recent = series.slice(-7);
+
+    const totalSteps = recent.reduce((sum, d) => sum + (d.steps || 0), 0);
+    const totalCals = recent.reduce((sum, d) => sum + (d.caloriesOut || 0), 0);
+    const totalActive = recent.reduce((sum, d) => sum + (d.azm || 0), 0); // Using AZM (Active Zone Mins) or fallback? 
+    // If 'azm' is missing, maybe 'activeMinutes'? Let's stick to 'azm' as seen in day details, or check key
+    // In day details we saw d.azm. 
+
+    container.innerHTML = `
+        <div class="kpi-card">
+            <div class="kpi-title">Steps (7d)</div>
+            <div class="kpi-value">${(totalSteps / 1000).toFixed(1)}k</div>
+            <div class="text-sm">Avg: ${Math.round(totalSteps / 7).toLocaleString()} / day</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Calories (7d)</div>
+            <div class="kpi-value">${(totalCals / 1000).toFixed(1)}k</div>
+             <div class="text-sm">Avg: ${Math.round(totalCals / 7).toLocaleString()} / day</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-title">Active Zone Mins (7d)</div>
+            <div class="kpi-value">${totalActive}</div>
+             <div class="text-sm">Avg: ${Math.round(totalActive / 7)} / day</div>
+        </div>
+    `;
+}
+
+function calculateAvg(arr, key) {
+    const valid = arr.filter(d => d[key] > 0);
+    if (valid.length === 0) return null;
+    return valid.reduce((sum, d) => sum + Number(d[key]), 0) / valid.length;
 }
