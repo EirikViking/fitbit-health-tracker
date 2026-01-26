@@ -111,7 +111,15 @@ export default {
             if (url.pathname === "/health") return new Response(JSON.stringify({ version: "1.0.0" }), { headers: { "Content-Type": "application/json" } });
             if (url.pathname === "/fitbit/auth") return handleAuth(request, env);
             if (url.pathname === "/fitbit/callback") return handleCallback(request, env);
+
+            // API Routes
             if (url.pathname === "/api/today") return handleToday(request, env);
+            if (url.pathname === "/api/sleep/today") return handleSleepToday(request, env);
+            if (url.pathname === "/api/heartrate/today") return handleHeartRateToday(request, env);
+            if (url.pathname === "/api/heartrate/intraday") return handleHeartRateIntraday(request, env);
+            if (url.pathname === "/api/activity/today") return handleActivityToday(request, env);
+            if (url.pathname === "/api/activity/timeseries") return handleActivityTimeSeries(request, env);
+            if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
 
             return new Response("Not Found", { status: 404 });
         } catch (e: any) {
@@ -157,11 +165,7 @@ async function handleCallback(req: Request, env: Env): Promise<Response> {
     // Exchange token
     const tokens = await exchangeToken(env, code);
 
-    // Store tokens (simulating session by just storing a singleton for this demo/poC user, 
-    // or implies single user app. For 1-user app this is fine. 
-    // In a real multi-user app we'd map this to a session ID cookie.)
-    // The goal: "Endpoint to fetch... today's summary... If missing, return 401"
-    // I'll store it in a fixed key 'current_user' for this minimal functional demo as no login system was requested.
+    // Store tokens
     await storeTokens(env, tokens);
 
     return new Response(
@@ -170,51 +174,15 @@ async function handleCallback(req: Request, env: Env): Promise<Response> {
     );
 }
 
+// Re-using fetchFitbitJSON logic for strict no-fail behavior
 async function handleToday(req: Request, env: Env): Promise<Response> {
-    let tokens = await getTokens(env);
+    const dateStr = new Date().toISOString().split('T')[0];
+    const res = await fetchFitbitJSON(env, `/activities/date/${dateStr}.json`);
 
-    if (!tokens) {
-        return new Response(JSON.stringify({ error: "not_connected", auth_url: "/fitbit/auth" }), {
-            status: 401,
-            headers: {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": env.APP_BASE_URL || "*"
-            }
-        });
-    }
+    if (res.status === 401) return unauthorizedResponse(env);
+    if (!res.ok) return new Response(JSON.stringify({ error: "upstream_error", details: res.data }), { status: 502 });
 
-    // Refresh if needed (give 5 min buffer)
-    if (Date.now() > tokens.expires_at - 300000) {
-        try {
-            tokens = await refreshToken(env, tokens.refresh_token);
-            await storeTokens(env, tokens);
-        } catch (e) {
-            // If refresh fails, force re-auth
-            return new Response(JSON.stringify({ error: "refresh_failed", auth_url: "/fitbit/auth" }), {
-                status: 401,
-                headers: { "Content-Type": "application/json" }
-            });
-        }
-    }
-
-    // Fetch Summary
-    // GET https://api.fitbit.com/1/user/-/activities/date/YYYY-MM-DD.json
-    const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-
-    const fitbitRes = await fetch(`https://api.fitbit.com/1/user/-/activities/date/${dateStr}.json`, {
-        headers: {
-            Authorization: `Bearer ${tokens.access_token}`
-        }
-    });
-
-    if (!fitbitRes.ok) {
-        return new Response(JSON.stringify({ error: "upstream_error", details: await fitbitRes.text() }), { status: 502 });
-    }
-
-    const data: any = await fitbitRes.json();
-    const summary = data.summary;
-
-    // Normalized
+    const summary = res.data?.summary;
     const result = {
         summary: {
             date: dateStr,
@@ -223,8 +191,214 @@ async function handleToday(req: Request, env: Env): Promise<Response> {
             distanceKm: (summary?.distances?.find((d: any) => d.activity === "total")?.distance || 0)
         }
     };
+    return jsonResponse(env, result);
+}
 
-    return new Response(JSON.stringify(result), {
+async function handleSleepToday(req: Request, env: Env): Promise<Response> {
+    const dateStr = new Date().toISOString().split('T')[0];
+    const res = await fetchFitbitJSON(env, `/sleep/date/${dateStr}.json`);
+
+    if (res.status === 401) return unauthorizedResponse(env);
+
+    // Defaults
+    let stats = {
+        date: dateStr,
+        totalMinutesAsleep: 0,
+        timeInBed: 0,
+        efficiency: 0,
+        stages: { deep: 0, light: 0, rem: 0, wake: 0 }
+    };
+
+    if (res.ok && res.data?.sleep && res.data.sleep.length > 0) {
+        // Take main sleep or standard aggregation
+        const mainSleep = res.data.sleep.find((s: any) => s.isMainSleep) || res.data.sleep[0];
+
+        stats.totalMinutesAsleep = mainSleep.minutesAsleep || 0;
+        stats.timeInBed = mainSleep.timeInBed || 0;
+        stats.efficiency = mainSleep.efficiency || 0;
+
+        if (mainSleep.levels?.summary) {
+            stats.stages.deep = mainSleep.levels.summary.deep?.minutes || 0;
+            stats.stages.light = mainSleep.levels.summary.light?.minutes || 0;
+            stats.stages.rem = mainSleep.levels.summary.rem?.minutes || 0;
+            stats.stages.wake = mainSleep.levels.summary.wake?.minutes || 0;
+        }
+    }
+
+    return jsonResponse(env, { summary: stats });
+}
+
+async function handleHeartRateToday(req: Request, env: Env): Promise<Response> {
+    const dateStr = new Date().toISOString().split('T')[0];
+    const res = await fetchFitbitJSON(env, `/activities/heart/date/${dateStr}/1d.json`);
+
+    if (res.status === 401) return unauthorizedResponse(env);
+
+    let stats = {
+        date: dateStr,
+        restingHeartRate: 0,
+        averageHeartRate: 0,
+        maxHeartRate: 0
+    };
+
+    if (res.ok && res.data?.["activities-heart"]?.[0]?.value) {
+        const val = res.data["activities-heart"][0].value;
+        stats.restingHeartRate = val.restingHeartRate || 0;
+    }
+
+    return jsonResponse(env, { summary: stats });
+}
+
+async function handleHeartRateIntraday(req: Request, env: Env): Promise<Response> {
+    const dateStr = new Date().toISOString().split('T')[0];
+    const res = await fetchFitbitJSON(env, `/activities/heart/date/${dateStr}/1d/1min.json`);
+
+    if (res.status === 401) return unauthorizedResponse(env);
+
+    const dataset: any[] = [];
+    if (res.ok && res.data?.["activities-heart-intraday"]?.dataset) {
+        dataset.push(...res.data["activities-heart-intraday"].dataset.map((d: any) => ({
+            time: d.time,
+            value: d.value
+        })));
+    }
+
+    return jsonResponse(env, { date: dateStr, dataset });
+}
+
+async function handleActivityToday(req: Request, env: Env): Promise<Response> {
+    const dateStr = new Date().toISOString().split('T')[0];
+    // Parallel fetch
+    const [actRes, azmRes] = await Promise.all([
+        fetchFitbitJSON(env, `/activities/date/${dateStr}.json`),
+        fetchFitbitJSON(env, `/activities/active-zone-minutes/date/${dateStr}.json`)
+    ]);
+
+    if (actRes.status === 401) return unauthorizedResponse(env);
+
+    const summary = actRes.data?.summary || {};
+    const azmList = azmRes.data?.["activities-active-zone-minutes"];
+    const azmVal = (azmList && azmList[0]?.value?.activeZoneMinutes) || 0;
+
+    const stats = {
+        date: dateStr,
+        steps: summary.steps || 0,
+        distanceKm: (summary.distances?.find((d: any) => d.activity === "total")?.distance || 0),
+        caloriesOut: summary.caloriesOut || 0,
+        floors: summary.floors || 0,
+        veryActiveMinutes: summary.veryActiveMinutes || 0,
+        fairlyActiveMinutes: summary.fairlyActiveMinutes || 0,
+        lightlyActiveMinutes: summary.lightlyActiveMinutes || 0,
+        sedentaryMinutes: summary.sedentaryMinutes || 0,
+        activeZoneMinutes: azmVal
+    };
+
+    return jsonResponse(env, { summary: stats });
+}
+
+async function handleActivityTimeSeries(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+    const rangeDays = parseInt(url.searchParams.get("days") || "30");
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (rangeDays - 1));
+
+    const endStr = end.toISOString().split('T')[0];
+    const startStr = start.toISOString().split('T')[0];
+
+    const paths = [
+        `/activities/steps/date/${startStr}/${endStr}.json`,
+        `/activities/distance/date/${startStr}/${endStr}.json`,
+        `/activities/calories/date/${startStr}/${endStr}.json`,
+        `/activities/active-zone-minutes/date/${startStr}/${endStr}.json`
+    ];
+
+    const responses = await Promise.all(paths.map(p => fetchFitbitJSON(env, p)));
+
+    if (responses[0].status === 401) return unauthorizedResponse(env);
+
+    const steps = responses[0].data?.["activities-steps"] || [];
+    const distances = responses[1].data?.["activities-distance"] || [];
+    const calories = responses[2].data?.["activities-calories"] || [];
+    const azm = responses[3].data?.["activities-active-zone-minutes"] || [];
+
+    const map = new Map<string, any>();
+    const allDates = new Set([...steps, ...distances, ...calories, ...azm].map((i: any) => i.dateTime));
+
+    for (const d of allDates) {
+        map.set(d, { date: d, steps: 0, distanceKm: 0, caloriesOut: 0, activeZoneMinutes: 0 });
+    }
+
+    steps.forEach((i: any) => { if (map.has(i.dateTime)) map.get(i.dateTime).steps = Number(i.value); });
+    distances.forEach((i: any) => { if (map.has(i.dateTime)) map.get(i.dateTime).distanceKm = Number(i.value); });
+    calories.forEach((i: any) => { if (map.has(i.dateTime)) map.get(i.dateTime).caloriesOut = Number(i.value); });
+    azm.forEach((i: any) => {
+        const val = i.value?.activeZoneMinutes || i.value || 0;
+        if (map.has(i.dateTime)) map.get(i.dateTime).activeZoneMinutes = Number(val);
+    });
+
+    const series = Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    return jsonResponse(env, {
+        range: { start: startStr, end: endStr, days: rangeDays },
+        series
+    });
+}
+
+async function handleHRVToday(req: Request, env: Env): Promise<Response> {
+    const dateStr = new Date().toISOString().split('T')[0];
+    const res = await fetchFitbitJSON(env, `/hrv/date/${dateStr}.json`);
+
+    if (res.status === 401) return unauthorizedResponse(env);
+
+    let stats = {
+        date: dateStr,
+        rmssd: 0,
+        coverage: 0
+    };
+
+    if (res.ok && res.data?.hrv && res.data.hrv.length > 0) {
+        const item = res.data.hrv[0];
+        stats.rmssd = item.value?.dailyRmssd || 0;
+    }
+
+    return jsonResponse(env, { summary: stats });
+}
+
+// --- Shared Helpers ---
+
+async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, status: number, data: any }> {
+    let tokens = await getTokens(env);
+    if (!tokens) return { ok: false, status: 401, data: null };
+
+    if (Date.now() > tokens.expires_at - 300000) {
+        try {
+            tokens = await refreshToken(env, tokens.refresh_token);
+            await storeTokens(env, tokens);
+        } catch {
+            return { ok: false, status: 401, data: null };
+        }
+    }
+
+    const res = await fetch(`https://api.fitbit.com/1/user/-${path}`, {
+        headers: { Authorization: `Bearer ${tokens.access_token}` }
+    });
+
+    if (!res.ok) {
+        if (res.status === 401) return { ok: false, status: 401, data: null };
+        try {
+            return { ok: false, status: res.status, data: await res.json() };
+        } catch {
+            return { ok: false, status: res.status, data: await res.text() };
+        }
+    }
+
+    const data = await res.json();
+    return { ok: true, status: 200, data };
+}
+
+function jsonResponse(env: Env, data: any) {
+    return new Response(JSON.stringify(data), {
         headers: {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": env.APP_BASE_URL || "*"
@@ -232,7 +406,15 @@ async function handleToday(req: Request, env: Env): Promise<Response> {
     });
 }
 
-// --- Helpers ---
+function unauthorizedResponse(env: Env) {
+    return new Response(JSON.stringify({ error: "not_connected", auth_url: "/fitbit/auth" }), {
+        status: 401,
+        headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": env.APP_BASE_URL || "*"
+        }
+    });
+}
 
 interface TokenBundle {
     access_token: string;

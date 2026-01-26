@@ -45,7 +45,13 @@ A minimal Cloudflare Worker app to track Fitbit daily stats using OAuth 2.0.
 - `GET /`: Dashboard
 - `GET /fitbit/auth`: Starts OAuth flow
 - `GET /fitbit/callback`: OAuth callback
-- `GET /api/today`: Returns JSON stats for today
+- `GET /api/today`: Returns JSON stats for today (summary)
+- `GET /api/sleep/today`: Sleep summary & stages
+- `GET /api/heartrate/today`: Resting HR & summary
+- `GET /api/heartrate/intraday`: Intraday HR dataset
+- `GET /api/activity/today`: Extended activity stats + AZM
+- `GET /api/activity/timeseries?days=30`: 30-day history of steps, cal, dist, azm
+- `GET /api/hrv/today`: HRV summary
 - `GET /health`: Health check
 
 ## Deployment
