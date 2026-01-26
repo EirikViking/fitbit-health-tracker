@@ -3,11 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2023-10-02"
 
 kv_namespaces = [
-  { binding = "FITBIT_KV", id = "xxx_kv_id_placeholder_xxx" }
+  { binding = "FITBIT_KV", id = "11196e8b1df14397914bdb09d9123bde", preview_id = "0076001f08cb4fd091ef41d559e67289" }
 ]
 
-[vars]
-FITBIT_CLIENT_ID = "replace_me"
-FITBIT_CLIENT_SECRET = "replace_me"
-FITBIT_REDIRECT_URL = "http://localhost:8787/fitbit/callback"
-APP_BASE_URL = "http://localhost:8787"
+
