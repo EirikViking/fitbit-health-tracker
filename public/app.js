@@ -28,6 +28,17 @@ window.setPeriod = function (period) {
     if (dashboardData) {
         renderCharts();
     }
+
+};
+
+window.switchTab = function (tabName) {
+    document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+    const target = document.getElementById(`tab-${tabName}`);
+    if (target) target.classList.add('active');
+
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
 };
 
 // Data normalization
@@ -241,6 +252,7 @@ async function loadDashboard() {
         }
 
         renderCharts();
+        renderKPIs(data);
 
         // Update status
         if (series.length > 0) {
@@ -557,15 +569,20 @@ function renderBackfillCard(data) {
             // Check if retry scheduled
             const nextRetry = failedDays[0].nextRetryAt;
             if (nextRetry && new Date(nextRetry) > new Date()) {
-                status = "Retry Scheduled";
-                statusEl.classList.add('scheduled');
+                status = "Retrying";
+                statusEl.classList.add('retry');
             } else {
-                status = "Error / Retrying";
+                status = "Error";
                 statusEl.classList.add('retry');
             }
         } else if (isActive) {
             status = "Scheduled";
             statusEl.classList.add('scheduled');
+        } else if (progress && progress.processedDays >= progress.totalDays && progress.totalDays > 0) {
+            status = "Done";
+            statusEl.classList.add('running'); // Re-use running color or add success? 
+            statusEl.style.background = 'var(--success-color)';
+            statusEl.style.color = 'white';
         }
         statusEl.textContent = status;
 
@@ -597,7 +614,9 @@ function renderBackfillCard(data) {
             $('bf-error-msg').textContent = err.errorMessage || "--";
             $('bf-error-date').textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.failedAt);
             const retryRow = $('bf-next-retry-row');
-            if (err.nextRetryAt) {
+
+            // Explicit Rate Limit / Retry Status Line
+            if (err.nextRetryAt && new Date(err.nextRetryAt) > new Date()) {
                 retryRow.classList.remove('hidden');
                 $('bf-next-retry').textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
             } else {
@@ -606,5 +625,72 @@ function renderBackfillCard(data) {
         } else {
             errSec.classList.add('hidden');
         }
+
+        // Raw Debug
+        const rawEl = $('rawBackfill');
+        if (rawEl) rawEl.textContent = JSON.stringify(data, null, 2);
+
     } catch (e) { console.warn("Backfill UI Error", e); }
+}
+
+function renderKPIs(data) {
+    const kpiGrid = $('overviewKPIs');
+    if (!kpiGrid || !data.series) return;
+
+    const series = Array.isArray(data.series) ? data.series : [];
+    if (series.length === 0) {
+        kpiGrid.innerHTML = '<p style="grid-column:1/-1;color:var(--text-secondary);">No data available for insights.</p>';
+        return;
+    }
+
+    // Helper to calc avg
+    const calcAvg = (arr, key) => {
+        const valid = arr.filter(d => d[key] > 0);
+        if (valid.length === 0) return null;
+        return valid.reduce((sum, d) => sum + Number(d[key]), 0) / valid.length;
+    };
+
+    // Get last 7 days and prior 7 days
+    const sorted = [...series].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const recent = sorted.slice(-7);
+    const prior = sorted.slice(-14, -7);
+    const last = sorted[sorted.length - 1];
+
+    // Render Function
+    const renderCard = (title, val, unit, key, higherIsBetter = true) => {
+        const avgCurr = calcAvg(recent, key);
+        const avgPrev = calcAvg(prior, key);
+
+        let trendHtml = '<span style="color:#ccc">&ndash;</span>';
+        if (avgCurr && avgPrev) {
+            const diff = avgCurr - avgPrev;
+            const up = diff > 0;
+            const symbol = up ? '↑' : '↓';
+            // Determine color
+            let good = up === higherIsBetter;
+            const colorClass = good ? 'trend-up' : 'trend-down';
+
+            trendHtml = `<span class="${colorClass}">${symbol} ${Math.abs(diff).toFixed(1)} vs prior 7d</span>`;
+        }
+
+        // Format value
+        let displayVal = '--';
+        if (val !== undefined && val !== null) {
+            displayVal = Number(val).toLocaleString(undefined, { maximumFractionDigits: 1 });
+        }
+
+        return `
+        <div class="kpi-card">
+            <div class="kpi-title">${title}</div>
+            <div class="kpi-value">${displayVal} <span style="font-size:1rem;font-weight:400;color:#666">${unit}</span></div>
+            <div class="kpi-meta">${trendHtml}</div>
+        </div>
+        `;
+    };
+
+    kpiGrid.innerHTML = [
+        renderCard('Resting HR', last.restingHr, 'bpm', 'restingHr', false),
+        renderCard('Sleep Duration', last.sleepMinutes ? last.sleepMinutes / 60 : 0, 'hrs', 'sleepMinutes', true),
+        renderCard('HRV (RMSSD)', last.hrvRmssd, 'ms', 'hrvRmssd', true)
+    ].join('');
 }
