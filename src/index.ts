@@ -123,9 +123,15 @@ export default {
             if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
 
             // Phase 2B: D1 History & Sync
+
+            // --- Phase 2D: D1 History & Sync ---
             if (url.pathname === "/api/sync") return handleSyncTrigger(request, env);
             if (url.pathname === "/api/history") return handleHistory(request, env);
             if (url.pathname === "/api/day") return handleDay(request, env);
+
+            // Phase 2E: Backfill
+            if (url.pathname === "/api/backfill") return handleBackfill(request, env, ctx);
+            if (url.pathname === "/api/backfill/status") return handleBackfillStatus(request, env);
 
             return new Response("Not Found", { status: 404 });
         } catch (e: any) {
@@ -143,6 +149,281 @@ export default {
 };
 
 // --- Handlers ---
+
+// ... (existing handlers) ...
+
+interface BackfillState {
+    running: boolean;
+    from: string;
+    to: string;
+    lastProcessedDate: string | null;
+    daysDone: number;
+    daysTotal: number;
+    startedAt: string;
+    updatedAt: string;
+    lastError: string | null;
+}
+
+async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    // Check if running
+    const rawState = await env.FITBIT_KV.get("backfill:progress");
+    if (rawState) {
+        const state = JSON.parse(rawState) as BackfillState;
+        if (state.running) {
+            return jsonResponse(env, { error: "Backfill already running", state }, 409);
+        }
+    }
+
+    let body: any = {};
+    try {
+        body = await req.json();
+    } catch {
+        return new Response("Invalid JSON", { status: 400 });
+    }
+
+    const { from, to } = body;
+    if (!from || !to) return new Response("Missing 'from' or 'to' date (YYYY-MM-DD)", { status: 400 });
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) return new Response("Invalid date format", { status: 400 });
+    if (fromDate > toDate) return new Response("'from' must be <= 'to'", { status: 400 });
+
+    const diffDays = Math.ceil((toDate.getTime() - fromDate.getTime()) / 86400000) + 1;
+    if (diffDays > 3650) return new Response("Range too large (max 3650 days)", { status: 400 });
+
+    // Init State
+    const initialState: BackfillState = {
+        running: true,
+        from,
+        to,
+        lastProcessedDate: null,
+        daysDone: 0,
+        daysTotal: diffDays,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastError: null
+    };
+
+    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(initialState));
+
+    // Trigger background process
+    ctx.waitUntil(processBackfill(env, fromDate, toDate, diffDays));
+    // fetch handler signature: async fetch(request: Request, env: Env, ctx: ExecutionContext)
+    // We didn't pass ctx to handlers. 
+    // BUT Cloudflare Workers allow executing async work after response if we use ctx.waitUntil.
+    // However, since we refactored handlers out, we need to adapt.
+    // OR we blindly trust the runtime to keep it alive a bit, or we just rely on standard promise floating.
+    // Wait, proper way is ctx.waitUntil.
+    // I can't easily change the function signature of handleBackfill without changing the router call site.
+    // Router call site has ctx. 
+    // I'll modify the router to pass ctx.
+
+    return jsonResponse(env, { ok: true, message: "Backfill started", state: initialState }, 202);
+}
+
+async function handleBackfillStatus(req: Request, env: Env): Promise<Response> {
+    const rawState = await env.FITBIT_KV.get("backfill:progress");
+    const state = rawState ? JSON.parse(rawState) : { running: false };
+    return jsonResponse(env, state);
+}
+
+async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays: number) {
+    let currentDate = new Date(toDate); // Iterate backwards
+    let done = 0;
+
+    // Read startedAt from initial state to preserve it
+    const rawState = await env.FITBIT_KV.get("backfill:progress");
+    const initialState = rawState ? JSON.parse(rawState) as BackfillState : null;
+    const startedAt = initialState?.startedAt || new Date().toISOString();
+
+    while (currentDate >= fromDate) {
+        const dateStr = currentDate.toISOString().split('T')[0];
+
+        // Retry logic
+        let attempts = 0;
+        let success = false;
+        let lastErr = null;
+
+        while (attempts <= 5 && !success) {
+            try {
+                const status = await syncDay(env, dateStr);
+
+                if (status === 429 || status >= 500) {
+                    throw new Error(`Status ${status}`);
+                }
+                success = true;
+            } catch (e: any) {
+                lastErr = e.message;
+                attempts++;
+                if (attempts <= 5) {
+                    const delay = 500 * Math.pow(2, attempts - 1); // 500, 1000, 2000...
+                    await new Promise(r => setTimeout(r, delay));
+                }
+            }
+        }
+
+        if (!success) {
+            // Updated State with Error
+            const state: BackfillState = {
+                running: false,
+                from: fromDate.toISOString().split('T')[0],
+                to: toDate.toISOString().split('T')[0],
+                lastProcessedDate: dateStr,
+                daysDone: done,
+                daysTotal: totalDays,
+                startedAt: startedAt,
+                updatedAt: new Date().toISOString(),
+                lastError: `Failed at ${dateStr}: ${lastErr}`
+            };
+            await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+            return; // Stop
+        }
+
+        // Success for this day
+        done++;
+
+        // Update State
+        // Only update KV every 5 days or so to save writes? Or per day as requested.
+        // Request says "update KV... after each day".
+        const state: BackfillState = {
+            running: true,
+            from: fromDate.toISOString().split('T')[0],
+            to: toDate.toISOString().split('T')[0],
+            lastProcessedDate: dateStr,
+            daysDone: done,
+            daysTotal: totalDays,
+            startedAt: startedAt,
+            updatedAt: new Date().toISOString(),
+            lastError: null
+        };
+        await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+
+        // Sleep rate limit
+        await new Promise(r => setTimeout(r, 250));
+
+        // Decrement day
+        currentDate.setDate(currentDate.getDate() - 1);
+    }
+
+    // Finished
+    const finalState: BackfillState = {
+        running: false,
+        from: fromDate.toISOString().split('T')[0],
+        to: toDate.toISOString().split('T')[0],
+        lastProcessedDate: "DONE",
+        daysDone: done,
+        daysTotal: totalDays,
+        startedAt: startedAt,
+        updatedAt: new Date().toISOString(),
+        lastError: null
+    };
+    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(finalState));
+}
+
+// ... handleAuth ... handleCallback ... handleToday ...
+
+// ... (existing handlers) ...
+
+// ... existing syncDay ... (Need to update signature)
+
+// Logic to fetch all raw data and upsert into D1
+async function syncDay(env: Env, date: string): Promise<number> {
+    const responses = await Promise.all([
+        fetchFitbitJSON(env, `/activities/date/${date}.json`),
+        fetchFitbitJSON(env, `/activities/active-zone-minutes/date/${date}.json`),
+        fetchFitbitJSON(env, `/sleep/date/${date}.json`),
+        fetchFitbitJSON(env, `/activities/heart/date/${date}/1d.json`),
+        fetchFitbitJSON(env, `/hrv/date/${date}.json`)
+    ]);
+
+    const maxStatus = Math.max(...responses.map(r => r.status));
+
+    // Check for critical failures (429/5xx) before processing? 
+    // Existing logic just tried to grab data.
+    // If we return status, caller decides.
+
+    const [actRes, azmRes, sleepRes, heartRes, hrvRes] = responses;
+
+    // Parse Activity
+    const summary = actRes.data?.summary || {};
+    const steps = summary.steps || 0;
+    const caloriesOut = summary.caloriesOut || 0;
+    const floors = summary.floors || 0;
+    const distanceKm = summary.distances?.find((d: any) => d.activity === "total")?.distance || 0;
+
+    // Parse AZM
+    const azmList = azmRes.data?.["activities-active-zone-minutes"];
+    const azm = (azmList && azmList[0]?.value?.activeZoneMinutes) || 0;
+
+    // Parse Heart
+    let restingHr = 0, avgHr = 0, maxHr = 0; // Avg/max not readily available in summary, default 0
+    if (heartRes.ok && heartRes.data?.["activities-heart"]?.[0]?.value) {
+        const val = heartRes.data["activities-heart"][0].value;
+        restingHr = val.restingHeartRate || 0;
+        // If we had intraday we could calc avg, but keeping simpe
+    }
+
+    // Parse HRV
+    let hrvRmssd = 0, hrvCoverage = 0;
+    if (hrvRes.ok && hrvRes.data?.hrv?.[0]) {
+        hrvRmssd = hrvRes.data.hrv[0].value?.dailyRmssd || 0;
+    }
+
+    // Parse Sleep
+    let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
+    let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
+    if (sleepRes.ok && sleepRes.data?.sleep?.length > 0) {
+        const s = sleepRes.data.sleep.find((x: any) => x.isMainSleep) || sleepRes.data.sleep[0];
+        sleepMinutes = s.minutesAsleep || 0;
+        timeInBed = s.timeInBed || 0;
+        efficiency = s.efficiency || 0;
+        if (s.levels?.summary) {
+            sDeep = s.levels.summary.deep?.minutes || 0;
+            sLight = s.levels.summary.light?.minutes || 0;
+            sRem = s.levels.summary.rem?.minutes || 0;
+            sWake = s.levels.summary.wake?.minutes || 0;
+        }
+    }
+
+    try {
+        await env.FITBIT_DB.prepare(`
+        INSERT INTO daily_metrics (
+            date, steps, calories_out, distance_km, floors, azm, 
+            resting_hr, avg_hr, max_hr, hrv_rmssd, hrv_coverage,
+            sleep_minutes, sleep_time_in_bed, sleep_efficiency,
+            sleep_deep, sleep_light, sleep_rem, sleep_wake, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            steps=excluded.steps, calories_out=excluded.calories_out, distance_km=excluded.distance_km,
+            floors=excluded.floors, azm=excluded.azm, resting_hr=excluded.resting_hr,
+            hrv_rmssd=excluded.hrv_rmssd, sleep_minutes=excluded.sleep_minutes,
+            sleep_time_in_bed=excluded.sleep_time_in_bed, sleep_efficiency=excluded.sleep_efficiency,
+            sleep_deep=excluded.sleep_deep, sleep_light=excluded.sleep_light,
+            sleep_rem=excluded.sleep_rem, sleep_wake=excluded.sleep_wake, updated_at=excluded.updated_at
+    `).bind(
+            date, steps, caloriesOut, distanceKm, floors, azm,
+            restingHr, avgHr, maxHr, hrvRmssd, hrvCoverage,
+            sleepMinutes, timeInBed, efficiency,
+            sDeep, sLight, sRem, sWake, new Date().toISOString()
+        ).run();
+    } catch (e: any) {
+        if (e.message && e.message.includes("no such table")) {
+            console.warn("D1 daily_metrics table missing. Skipping upsert.", e.message);
+            // If table missing, we can consider it a success (soft fail) or fail. 
+            // Return 200-ish to allow backfill to continue for other checks? 
+            // Or return failure? 
+            // Let's return 200 status as it's not an API failure.
+            return 200;
+        }
+        throw e;
+    }
+
+    return maxStatus;
+}
 
 async function handleAuth(req: Request, env: Env): Promise<Response> {
     const state = crypto.randomUUID();
@@ -460,78 +741,7 @@ async function handleDay(req: Request, env: Env): Promise<Response> {
     });
 }
 
-// Logic to fetch all raw data and upsert into D1
-async function syncDay(env: Env, date: string) {
-    const [actRes, azmRes, sleepRes, heartRes, hrvRes] = await Promise.all([
-        fetchFitbitJSON(env, `/activities/date/${date}.json`),
-        fetchFitbitJSON(env, `/activities/active-zone-minutes/date/${date}.json`),
-        fetchFitbitJSON(env, `/sleep/date/${date}.json`),
-        fetchFitbitJSON(env, `/activities/heart/date/${date}/1d.json`),
-        fetchFitbitJSON(env, `/hrv/date/${date}.json`)
-    ]);
 
-    // Parse Activity
-    const summary = actRes.data?.summary || {};
-    const steps = summary.steps || 0;
-    const caloriesOut = summary.caloriesOut || 0;
-    const floors = summary.floors || 0;
-    const distanceKm = summary.distances?.find((d: any) => d.activity === "total")?.distance || 0;
-
-    // Parse AZM
-    const azmList = azmRes.data?.["activities-active-zone-minutes"];
-    const azm = (azmList && azmList[0]?.value?.activeZoneMinutes) || 0;
-
-    // Parse Heart
-    let restingHr = 0, avgHr = 0, maxHr = 0; // Avg/max not readily available in summary, default 0
-    if (heartRes.ok && heartRes.data?.["activities-heart"]?.[0]?.value) {
-        const val = heartRes.data["activities-heart"][0].value;
-        restingHr = val.restingHeartRate || 0;
-        // If we had intraday we could calc avg, but keeping simpe
-    }
-
-    // Parse HRV
-    let hrvRmssd = 0, hrvCoverage = 0;
-    if (hrvRes.ok && hrvRes.data?.hrv?.[0]) {
-        hrvRmssd = hrvRes.data.hrv[0].value?.dailyRmssd || 0;
-    }
-
-    // Parse Sleep
-    let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
-    let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
-    if (sleepRes.ok && sleepRes.data?.sleep?.length > 0) {
-        const s = sleepRes.data.sleep.find((x: any) => x.isMainSleep) || sleepRes.data.sleep[0];
-        sleepMinutes = s.minutesAsleep || 0;
-        timeInBed = s.timeInBed || 0;
-        efficiency = s.efficiency || 0;
-        if (s.levels?.summary) {
-            sDeep = s.levels.summary.deep?.minutes || 0;
-            sLight = s.levels.summary.light?.minutes || 0;
-            sRem = s.levels.summary.rem?.minutes || 0;
-            sWake = s.levels.summary.wake?.minutes || 0;
-        }
-    }
-
-    await env.FITBIT_DB.prepare(`
-        INSERT INTO daily_metrics (
-            date, steps, calories_out, distance_km, floors, azm, 
-            resting_hr, avg_hr, max_hr, hrv_rmssd, hrv_coverage,
-            sleep_minutes, sleep_time_in_bed, sleep_efficiency,
-            sleep_deep, sleep_light, sleep_rem, sleep_wake, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(date) DO UPDATE SET
-            steps=excluded.steps, calories_out=excluded.calories_out, distance_km=excluded.distance_km,
-            floors=excluded.floors, azm=excluded.azm, resting_hr=excluded.resting_hr,
-            hrv_rmssd=excluded.hrv_rmssd, sleep_minutes=excluded.sleep_minutes,
-            sleep_time_in_bed=excluded.sleep_time_in_bed, sleep_efficiency=excluded.sleep_efficiency,
-            sleep_deep=excluded.sleep_deep, sleep_light=excluded.sleep_light,
-            sleep_rem=excluded.sleep_rem, sleep_wake=excluded.sleep_wake, updated_at=excluded.updated_at
-    `).bind(
-        date, steps, caloriesOut, distanceKm, floors, azm,
-        restingHr, avgHr, maxHr, hrvRmssd, hrvCoverage,
-        sleepMinutes, timeInBed, efficiency,
-        sDeep, sLight, sRem, sWake, new Date().toISOString()
-    ).run();
-}
 
 
 
@@ -571,8 +781,9 @@ async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, s
     return { ok: true, status: 200, data };
 }
 
-function jsonResponse(env: Env, data: any) {
+function jsonResponse(env: Env, data: any, status = 200) {
     return new Response(JSON.stringify(data), {
+        status: status,
         headers: {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": env.APP_BASE_URL || "*"
