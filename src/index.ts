@@ -42,8 +42,12 @@ const INDEX_HTML = `
       <div class="stat">🔥 Calories: <strong id="calories">--</strong></div>
       <div class="stat">📏 Distance: <strong id="distance">--</strong> km</div>
     </div>
-    <button onclick="loadData()" style="padding: 0.5rem 1rem;">Refresh</button>
+    <div style="margin-bottom: 1rem;">
+      <button onclick="loadData()" class="btn" style="padding: 0.5rem 1rem;">Refresh Dashboard</button>
+    </div>
   </div>
+
+
   
   <div id="error"></div>
 
@@ -79,11 +83,16 @@ const INDEX_HTML = `
         connectSec.classList.add('hidden');
         dashSec.classList.remove('hidden');
 
+
+
       } catch (err) {
         console.error(err);
         errorDiv.textContent = err.message || 'An error occurred';
       }
     }
+
+    // --- Backfill UI Logic ---
+
 
     // Load on start
     loadData();
@@ -118,9 +127,7 @@ export default {
             if (url.pathname === "/api/health") return handleHealth(request, env);
 
             // Exports
-            if (url.pathname === "/api/export/daily") return handleExportDaily(request, env);
-            if (url.pathname === "/api/export/weekly") return handleExportWeekly(request, env);
-            if (url.pathname === "/api/export/monthly") return handleExportMonthly(request, env);
+
 
             // API Routes
             if (url.pathname === "/api/today") return handleToday(request, env);
@@ -145,7 +152,10 @@ export default {
             if (url.pathname === "/api/backfill/plan/start") return handleBackfillPlanStart(request, env, ctx);
             if (url.pathname === "/api/backfill/plan/stop") return handleBackfillPlanStop(request, env);
             if (url.pathname === "/api/backfill/plan/status") return handleBackfillPlanStatus(request, env);
+            if (url.pathname === "/api/backfill/plan/tick") return handleBackfillPlanTick(request, env, ctx);
+            if (url.pathname === "/api/backfill/plan/failed/skip") return handleBackfillFailedSkip(request, env);
             if (url.pathname === "/api/cron/status") return handleCronStatus(request, env);
+            if (url.pathname === "/api/dev/cron/tick") return handleDevCronTick(request, env);
 
             return new Response("Not Found", { status: 404 });
         } catch (e: any) {
@@ -154,52 +164,90 @@ export default {
     },
 
     async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-        ctx.waitUntil((async () => {
-            const start = Date.now();
-            const today = new Date().toISOString().split('T')[0];
-            const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-            let error = null;
+        const scheduledWork = (async () => {
+            await runCronWork(env, {
+                trigger: "scheduled",
+                schedule: String(event.cron || "unknown"),
+                triggeredAt: new Date().toISOString()
+            });
+        })();
+
+        ctx.waitUntil(scheduledWork);
+    }
+};
+
+// --- Cron Work (Extracted for reuse in scheduled + dev endpoint) ---
+
+async function runCronWork(env: Env, meta: { trigger: string, schedule: string, triggeredAt: string }): Promise<void> {
+    try {
+        const start = Date.now();
+        const today = new Date().toISOString().split('T')[0];
+        const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+        let error = null;
+        let bfStats = { newDays: 0, retriedDays: 0, blockedByAuth: false };
+
+        try {
+            console.log(`[CRON] Triggered at ${meta.triggeredAt}, trigger: ${meta.trigger}, schedule: ${meta.schedule}`);
+
+            // Sync Today - Best effort
+            await syncDay(env, today);
+
+            // Sync Yesterday - Critical (Finalize data) / Retry Logic
+            try {
+                await syncDay(env, yesterday);
+            } catch (e) {
+                console.warn(`Cron sync failed for ${yesterday}, retrying...`);
+                await new Promise(r => setTimeout(r, 2000));
+                await syncDay(env, yesterday);
+            }
+
+            await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
+                lastRunAt: new Date().toISOString(),
+                lastSyncDate: today,
+                success: true,
+                durationMs: Date.now() - start,
+                synced_dates: [today, yesterday],
+                triggeredAt: meta.triggeredAt,
+                trigger: meta.trigger
+            }));
+
+            // C) Process backfill chunk
+            bfStats = await processAutomatedBackfillChunk(env);
+            console.log(`[CRON] Backfill processed: ${bfStats.newDays} new, ${bfStats.retriedDays} retried, blockedByAuth: ${bfStats.blockedByAuth}`);
+
+        } catch (e: any) {
+            error = e.message || 'Unknown error';
+            console.error(`[CRON] Error: ${error}`);
+            if (e.stack) console.error(`[CRON] Stack: ${String(e.stack)}`);
 
             try {
-                // Sync Today - Best effort
-                await syncDay(env, today);
-
-                // Sync Yesterday - Critical (Finalize data) / Retry Logic
-                try {
-                    await syncDay(env, yesterday);
-                } catch (e) {
-                    console.warn(`Cron sync failed for ${yesterday}, retrying...`);
-                    await new Promise(r => setTimeout(r, 2000));
-                    await syncDay(env, yesterday);
-                }
-
-                await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
-                    lastRunAt: new Date().toISOString(),
-                    lastSyncDate: today,
-                    success: true,
-                    durationMs: Date.now() - start,
-                    synced_dates: [today, yesterday]
-                }));
-
-            } catch (e: any) {
-                error = e.message;
                 await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
                     lastRunAt: new Date().toISOString(),
                     lastSyncDate: null,
                     success: false,
                     durationMs: Date.now() - start,
-                    error: error
+                    error: error,
+                    triggeredAt: meta.triggeredAt,
+                    trigger: meta.trigger
                 }));
+            } catch (kvError: any) {
+                console.error(`[CRON] Failed to log error to KV: ${String(kvError.message)}`);
             }
+        }
 
-            // C) Drift metrics
-            await updateCronStats(env, error === null, Date.now() - start);
-
-            // D) Automated Backfill
-            await processAutomatedBackfillChunk(env, ctx);
-        })());
+        // Update stats (never throw from here)
+        try {
+            await updateCronStats(env, error === null, Date.now() - start, bfStats);
+        } catch (statsError: any) {
+            console.error(`[CRON] Failed to update stats: ${String(statsError.message)}`);
+        }
+    } catch (outerError: any) {
+        // Catch ANY error that escaped all inner try/catch blocks
+        const msg = outerError?.message || String(outerError) || 'unknown';
+        console.error(`[CRON] Unhandled error: ${msg}`);
+        if (outerError?.stack) console.error(`[CRON] Stack: ${String(outerError.stack)}`);
     }
-};
+}
 
 // --- Handlers ---
 
@@ -216,6 +264,14 @@ interface BackfillState {
     updatedAt: string;
     lastError: string | null;
     retries: number;
+    failedDays?: Array<{
+        date: string;
+        errorType: string;
+        errorMessage: string;
+        failedAt: string;
+        nextRetryAt: string | null;
+        retryCount: number;
+    }>;
 }
 
 async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -326,7 +382,7 @@ async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionCon
     await env.FITBIT_KV.delete("backfill:stop");
 
     // Trigger first chunk immediately
-    ctx.waitUntil(processAutomatedBackfillChunk(env, ctx));
+    ctx.waitUntil(processAutomatedBackfillChunk(env));
 
     return jsonResponse(env, { message: "Backfill plan started", plan });
 }
@@ -361,7 +417,65 @@ async function handleBackfillPlanStatus(req: Request, env: Env): Promise<Respons
         }
     }
 
-    return jsonResponse(env, { plan, progress, estimatedRemainingDays });
+    return jsonResponse(env, {
+        plan,
+        progress,
+        estimatedRemainingDays,
+        lastUpdatedAt: plan?.updatedAt || progress?.updatedAt || null
+    });
+}
+
+async function handleBackfillPlanTick(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
+    if (!rawPlan) return jsonResponse(env, { ok: false, message: "No plan found" }, 409);
+
+    const plan = JSON.parse(rawPlan) as BackfillPlan;
+    if (!plan.active) return jsonResponse(env, { ok: false, message: "Plan not active" }, 409);
+
+    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
+    if (rawProgress) {
+        const p = JSON.parse(rawProgress);
+        if (p.running) return jsonResponse(env, { ok: true, message: "already running" }, 202);
+    }
+
+    // Wrap in async to run in background, but we don't wait for return in response
+    ctx.waitUntil((async () => {
+        const stats = await processAutomatedBackfillChunk(env);
+        await updateCronStats(env, true, 0, stats); // Update stats for manual tick too? Duration 0 or tracking?
+    })());
+
+    return jsonResponse(env, { ok: true, message: "tick started" }, 202);
+}
+
+async function handleBackfillFailedSkip(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    let body: any = {};
+    try { body = await req.json(); } catch { return new Response("Invalid JSON", { status: 400 }); }
+    const { date } = body;
+    if (!date) return new Response("Missing date", { status: 400 });
+
+    const rawState = await env.FITBIT_KV.get("backfill:progress");
+    if (!rawState) return jsonResponse(env, { error: "No state" }, 404);
+
+    const state = JSON.parse(rawState) as BackfillState;
+    if (!state.failedDays || state.failedDays.length === 0) return jsonResponse(env, { error: "No failed days" }, 404);
+
+    const idx = state.failedDays.findIndex((f: any) => f.date === date);
+    if (idx === -1) return jsonResponse(env, { error: "Date not found in failed list" }, 404);
+
+    const item = state.failedDays[idx];
+    item.nextRetryAt = new Date(Date.now() + 86400000).toISOString(); // +24h
+
+    // Move to end
+    state.failedDays.splice(idx, 1);
+    state.failedDays.push(item);
+
+    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+
+    return jsonResponse(env, { ok: true, message: "Skipped", state });
 }
 
 async function handleCronStatus(req: Request, env: Env): Promise<Response> {
@@ -375,6 +489,36 @@ async function handleCronStatus(req: Request, env: Env): Promise<Response> {
     const backfill = rawBackfill ? JSON.parse(rawBackfill) : { running: false };
 
     return jsonResponse(env, { cron, stats, backfill });
+}
+
+async function handleDevCronTick(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    // Dev-only gate: require X-Dev-Cron header
+    const devHeader = req.headers.get("X-Dev-Cron");
+    if (devHeader !== "1") {
+        // Hide this endpoint in production by returning 404
+        return new Response("Not Found", { status: 404 });
+    }
+
+    const triggeredAt = new Date().toISOString();
+
+    // Run cron work synchronously (no waitUntil needed for HTTP response)
+    await runCronWork(env, {
+        trigger: "http_dev",
+        schedule: "manual",
+        triggeredAt: triggeredAt
+    });
+
+    // Fetch updated stats after cron work completes
+    const rawStats = await env.FITBIT_KV.get("cron:stats");
+    const stats = rawStats ? JSON.parse(rawStats) : null;
+
+    return jsonResponse(env, {
+        ok: true,
+        stats: stats,
+        at: triggeredAt
+    });
 }
 
 async function handleAuthStatus(req: Request, env: Env): Promise<Response> {
@@ -435,210 +579,212 @@ async function handleHealth(req: Request, env: Env): Promise<Response> {
     });
 }
 
-// --- Export Handlers ---
 
-async function handleExportDaily(req: Request, env: Env): Promise<Response> {
-    const { results } = await env.FITBIT_DB.prepare("SELECT * FROM daily_metrics ORDER BY date DESC").all();
 
-    // Header: date,restingHr,hrv,sleepMinutes,cardioLoad,cardioLoadStatus
-    const headers = ["date", "restingHr", "hrv", "sleepMinutes", "cardioLoad", "cardioLoadStatus"];
-    const rows = (results || []).map((r: any) => {
-        const s = sanitizeDailyMetrics(r.date, {
-            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
-        });
-        return [
-            r.date,
-            s.restingHr ?? "",
-            s.hrvRmssd ?? "",
-            s.sleepMinutes ?? "",
-            s.cardioLoad ?? "",
-            s.cardioLoadStatus ?? "missing"
-        ];
-    });
-
-    return csvResponse(headers, rows, `fitbit_daily_${new Date().toISOString().split('T')[0]}.csv`);
-}
-
-async function handleExportWeekly(req: Request, env: Env): Promise<Response> {
-    const { results } = await env.FITBIT_DB.prepare("SELECT * FROM daily_metrics ORDER BY date ASC").all();
-    const weeks = new Map<string, { count: number, restingHrSum: number, hrvSum: number, sleepSum: number }>();
-
-    // Simple aggregator
-    for (const r of (results || []) as any[]) {
-        const d = new Date(r.date);
-        // Get Monday of the week
-        const day = d.getDay();
-        const diff = d.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
-        const monday = new Date(d.setDate(diff));
-        const weekKey = monday.toISOString().split('T')[0];
-
-        const s = sanitizeDailyMetrics(r.date, {
-            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
-        });
-
-        if (!weeks.has(weekKey)) weeks.set(weekKey, { count: 0, restingHrSum: 0, hrvSum: 0, sleepSum: 0 });
-        const w = weeks.get(weekKey)!;
-
-        if (s.restingHr) { w.restingHrSum += s.restingHr; }
-        if (s.hrvRmssd) { w.hrvSum += s.hrvRmssd; }
-        if (s.sleepMinutes) { w.sleepSum += s.sleepMinutes; }
-        w.count++;
-        // Note: count is rough here, we should ideally count per-metric for correct averages. 
-        // But "Weekly/Monthly consistency" prompt C said "Reberegn aggregates". 
-        // We'll do a simplified avg based on days present. 
-        // Actually better to sum/count individually to be correct.
-    }
-
-    // Refined aggregation loop
-    const refinedWeeks = new Map<string, {
-        hrCount: number, hrSum: number,
-        hrvCount: number, hrvSum: number,
-        sleepCount: number, sleepSum: number
-    }>();
-
-    for (const r of (results || []) as any[]) {
-        const d = new Date(r.date);
-        const day = d.getDay();
-        const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-        const monday = new Date(d.setDate(diff)).toISOString().split('T')[0];
-
-        if (!refinedWeeks.has(monday)) refinedWeeks.set(monday, { hrCount: 0, hrSum: 0, hrvCount: 0, hrvSum: 0, sleepCount: 0, sleepSum: 0 });
-        const w = refinedWeeks.get(monday)!;
-        const s = sanitizeDailyMetrics(r.date, {
-            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
-        });
-
-        if (s.restingHr) { w.hrSum += s.restingHr; w.hrCount++; }
-        if (s.hrvRmssd) { w.hrvSum += s.hrvRmssd; w.hrvCount++; }
-        if (s.sleepMinutes) { w.sleepSum += s.sleepMinutes; w.sleepCount++; }
-    }
-
-    const headers = ["weekStartDate", "restingHr", "hrv", "sleepMinutes"];
-    const rows = Array.from(refinedWeeks.entries()).sort().map(([date, w]) => [
-        date,
-        w.hrCount > 0 ? Math.round(w.hrSum / w.hrCount) : "",
-        w.hrvCount > 0 ? Math.round(w.hrvSum / w.hrvCount) : "",
-        w.sleepCount > 0 ? Math.round(w.sleepSum / w.sleepCount) : ""
-    ]);
-
-    return csvResponse(headers, rows, `fitbit_weekly_${new Date().toISOString().split('T')[0]}.csv`);
-}
-
-async function handleExportMonthly(req: Request, env: Env): Promise<Response> {
-    const { results } = await env.FITBIT_DB.prepare("SELECT * FROM daily_metrics ORDER BY date ASC").all();
-    const months = new Map<string, {
-        hrCount: number, hrSum: number,
-        hrvCount: number, hrvSum: number,
-        sleepCount: number, sleepSum: number
-    }>();
-
-    for (const r of (results || []) as any[]) {
-        const monthKey = r.date.substring(0, 7) + "-01"; // YYYY-MM-01
-        if (!months.has(monthKey)) months.set(monthKey, { hrCount: 0, hrSum: 0, hrvCount: 0, hrvSum: 0, sleepCount: 0, sleepSum: 0 });
-        const w = months.get(monthKey)!;
-        const s = sanitizeDailyMetrics(r.date, {
-            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
-        });
-
-        if (s.restingHr) { w.hrSum += s.restingHr; w.hrCount++; }
-        if (s.hrvRmssd) { w.hrvSum += s.hrvRmssd; w.hrvCount++; }
-        if (s.sleepMinutes) { w.sleepSum += s.sleepMinutes; w.sleepCount++; }
-    }
-
-    const headers = ["monthStartDate", "restingHr", "hrv", "sleepMinutes"];
-    const rows = Array.from(months.entries()).sort().map(([date, w]) => [
-        date,
-        w.hrCount > 0 ? Math.round(w.hrSum / w.hrCount) : "",
-        w.hrvCount > 0 ? Math.round(w.hrvSum / w.hrvCount) : "",
-        w.sleepCount > 0 ? Math.round(w.sleepSum / w.sleepCount) : ""
-    ]);
-
-    return csvResponse(headers, rows, `fitbit_monthly_${new Date().toISOString().split('T')[0]}.csv`);
-}
-
-function csvResponse(headers: string[], rows: any[][], filename: string) {
-    const csvContent = [
-        headers.join(","),
-        ...rows.map(row => row.join(","))
-    ].join("\n");
-
-    return new Response(csvContent, {
-        headers: {
-            "Content-Type": "text/csv",
-            "Content-Disposition": `attachment; filename="${filename}"`
-        }
-    });
-}
-
-async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays: number, maxTimeMs: number = 20000) {
+async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays: number, maxTimeMs: number = 20000): Promise<{ newDays: number, retriedDays: number, blockedByAuth: boolean }> {
     const startTime = Date.now();
-    let currentDate = new Date(toDate); // Iterate backwards
-    let processed = 0;
+    let processedNewDays = 0;
+    let processedRetriedDays = 0;
+    let blockedByAuth = false;
 
-    // Read startedAt from initial state to preserve it
+    // Read initial state to preserve startedAt and failedDays
     const rawState = await env.FITBIT_KV.get("backfill:progress");
     const initialState = rawState ? JSON.parse(rawState) as BackfillState : null;
     const startedAt = initialState?.startedAt || new Date().toISOString();
+    let failedDays = initialState?.failedDays || [];
 
-    // Check if resuming (processedDays > 0)
-    if (initialState && initialState.lastProcessedDate && initialState.lastProcessedDate !== "DONE" && initialState.running) {
-        // Resume logic: if we are restarting, we might want to continue from where we left off.
-        // But here we are passed the explicit range from the request unless this is a self-resume?
-        // The prompt implies "Request... A limit of 20 days".
-        // The prompt says "processedDays... if resuming".
-        // For simplicity, we trust the caller (handleBackfill) provided the range. 
-        // We will just update processed count. 
-        // If we want to support recovering a crashed run without new request, that's different.
-        // But for now, we assume a fresh trigger or a retry of the handleBackfill logic.
-        // Actually, if we are just calling processBackfill from handleBackfill, it works as a new run.
+    // Normalize failedDays (add missing fields from old schema)
+    let needsNormalization = false;
+    failedDays = failedDays.map(item => {
+        let normalized = { ...item };
+
+        if (normalized.retryCount === undefined || normalized.retryCount === null) {
+            normalized.retryCount = 0;
+            needsNormalization = true;
+        }
+
+        if (!normalized.nextRetryAt) {
+            const now = Date.now();
+            if (normalized.errorType === "auth_required") {
+                normalized.nextRetryAt = null;
+            } else if (normalized.errorType === "rate_limit") {
+                normalized.nextRetryAt = new Date(now + 5 * 60000).toISOString(); // 5 min
+            } else {
+                normalized.nextRetryAt = new Date(now + 2 * 60000).toISOString(); // 2 min
+            }
+            needsNormalization = true;
+        }
+
+        return normalized;
+    });
+
+    // Persist normalized state back if needed (one-time fix for old data)
+    if (needsNormalization && initialState && failedDays.length > 0) {
+        console.log(`[BACKFILL] Normalized ${failedDays.length} failed days, persisting...`);
+        const normalizedState = {
+            ...initialState,
+            failedDays: failedDays
+        };
+        await env.FITBIT_KV.put("backfill:progress", JSON.stringify(normalizedState));
     }
 
-    while (currentDate >= fromDate) {
+    // Check for auth_required before starting any sync
+    const authRequired = await env.FITBIT_KV.get("auth:required");
+    if (authRequired === "true") {
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, toDate.toISOString().split('T')[0], "Auth required", false, 0, failedDays);
+        return { newDays: 0, retriedDays: 0, blockedByAuth: true };
+    }
+
+    // Hard cap on failed days to prevent infinite growth
+    if (failedDays.length >= 50) {
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, toDate.toISOString().split('T')[0], "Too many failed days (50+). Manual intervention required.", false, 0, failedDays);
+        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    }
+
+    // Policy: Prioritize retrying failed days that are due
+    let retriesAttemptedThisChunk = 0;
+    const maxRetriesPerChunk = 1; // Only attempt one retry per chunk to allow new days to progress
+
+    // Sort failedDays by nextRetryAt to process oldest due first
+    failedDays.sort((a, b) => (new Date(a.nextRetryAt || 0).getTime()) - (new Date(b.nextRetryAt || 0).getTime()));
+
+    while (retriesAttemptedThisChunk < maxRetriesPerChunk && failedDays.length > 0) {
+        const oldestFailed = failedDays[0];
+        const dateStr = oldestFailed.date;
+
+        let shouldRetry = true;
+        if (oldestFailed.nextRetryAt) {
+            const retryTime = new Date(oldestFailed.nextRetryAt).getTime();
+            if (retryTime > Date.now()) {
+                shouldRetry = false; // Not yet due for retry
+            }
+        }
+
+        if (shouldRetry) {
+            console.log(`Retrying failed day: ${dateStr} (Attempt ${oldestFailed.retryCount + 1})`);
+            const { success, errorType, errorMessage, nextRetryAt } = await attemptSyncDay(env, dateStr, oldestFailed.retryCount);
+
+            if (success) {
+                // Remove from failedDays
+                failedDays.shift();
+                processedRetriedDays++;
+                await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, null, true, 0, failedDays);
+                await invalidateHistoryCache(env);
+                retriesAttemptedThisChunk++;
+                // Continue to check for more retries or new days
+            } else {
+                // Still failing, update and re-add to failedDays (or keep at head if it's the only one)
+                oldestFailed.errorType = errorType;
+                oldestFailed.errorMessage = errorMessage;
+                oldestFailed.failedAt = new Date().toISOString();
+                oldestFailed.nextRetryAt = nextRetryAt;
+                oldestFailed.retryCount++;
+                // Move to end of failedDays to give other failed days a chance, or if it's the only one, it stays.
+                failedDays.shift();
+                failedDays.push(oldestFailed);
+                await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Retry failed: ${errorMessage}`, true, 0, failedDays);
+                retriesAttemptedThisChunk++;
+                // If auth required, stop immediately
+                if (errorType === "auth_required") {
+                    blockedByAuth = true;
+                    return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: true };
+                }
+                // If rate limited, stop processing this chunk to respect limits
+                if (errorType === "rate_limit") {
+                    console.log("Rate limited during retry, stopping chunk processing.");
+                    break; // Exit retry loop, then new day loop
+                }
+            }
+        } else {
+            // Oldest failed day is not yet due, so no more retries for this chunk
+            console.log(`Oldest failed day (${dateStr}) not due for retry yet (${oldestFailed.nextRetryAt}), proceeding to new days...`);
+            break;
+        }
+
+        // Check time limit after each retry attempt
+        if (Date.now() - startTime > maxTimeMs) {
+            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, "Time limit exceeded during retry", false, 0, failedDays);
+            return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: false };
+        }
+    }
+
+    // Policy: Process new days (iterate backwards from toDate to fromDate)
+    let currentDate = new Date(toDate);
+    const maxNewDaysPerTick = 7; // Limit new days processed per chunk
+
+    // Find the last processed date from previous runs to avoid re-processing
+    let lastProcessedDateFromState = initialState?.lastProcessedDate;
+    if (lastProcessedDateFromState && lastProcessedDateFromState !== "DONE") {
+        const lastProcessed = new Date(lastProcessedDateFromState);
+        // Start from the day *before* the last processed day
+        currentDate = new Date(lastProcessed);
+        currentDate.setDate(currentDate.getDate() - 1);
+    }
+
+    while (currentDate >= fromDate && processedNewDays < maxNewDaysPerTick) {
         // Check for Stop Signal
         const stopSignal = await env.FITBIT_KV.get("backfill:stop");
         if (stopSignal === "true") {
-            await updateState(env, fromDate, toDate, processed, totalDays, startedAt, currentDate.toISOString(), "Stopped by user", false);
-            return;
+            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], "Stopped by user", false, 0, failedDays);
+            return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: false };
         }
 
-        // Check for Time Limit (variable)
+        // Check for Time Limit
         if (Date.now() - startTime > maxTimeMs) {
-            await updateState(env, fromDate, toDate, processed, totalDays, startedAt, currentDate.toISOString(), "Time limit exceeded", false);
-            return;
+            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], "Time limit exceeded", false, 0, failedDays);
+            return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: false };
         }
 
         const dateStr = currentDate.toISOString().split('T')[0];
 
-        // Retry logic
-        let attempts = 0;
-        let success = false;
-        let lastErr = null;
-
-        while (attempts < 3 && !success) { // Max 3 retries as per summary
-            attempts++;
-            try {
-                const status = await syncDay(env, dateStr);
-
-                if (status === 429 || status >= 500) {
-                    throw new Error(`Status ${status}`);
-                }
-                success = true;
-            } catch (e: any) {
-                lastErr = e.message;
-                if (attempts < 3) {
-                    const delay = 500 * Math.pow(2, attempts - 1);
-                    await new Promise(r => setTimeout(r, delay));
-                }
-            }
+        // Skip if this day is already in failedDays and not due for retry (handled above)
+        if (failedDays.some(f => f.date === dateStr && (new Date(f.nextRetryAt || 0).getTime() > Date.now()))) {
+            console.log(`Skipping new day ${dateStr} as it's a failed day not yet due for retry.`);
+            currentDate.setDate(currentDate.getDate() - 1);
+            continue;
         }
+
+        const { success, errorType, errorMessage, nextRetryAt } = await attemptSyncDay(env, dateStr, 0);
 
         if (!success) {
-            await updateState(env, fromDate, toDate, processed, totalDays, startedAt, dateStr, `Failed at ${dateStr}: ${lastErr}`, false, attempts);
-            return;
+            // Add to failedDays if not already there, or update if it was a retry attempt
+            const existingFailedIdx = failedDays.findIndex(f => f.date === dateStr);
+            if (existingFailedIdx === -1) {
+                failedDays.push({
+                    date: dateStr,
+                    errorType,
+                    errorMessage,
+                    failedAt: new Date().toISOString(),
+                    nextRetryAt,
+                    retryCount: 0
+                });
+            } else {
+                // This case should ideally not happen if we process retries first, but for safety
+                failedDays[existingFailedIdx].errorType = errorType;
+                failedDays[existingFailedIdx].errorMessage = errorMessage;
+                failedDays[existingFailedIdx].failedAt = new Date().toISOString();
+                failedDays[existingFailedIdx].nextRetryAt = nextRetryAt;
+                failedDays[existingFailedIdx].retryCount++;
+                failedDays[existingFailedIdx].retryCount++;
+            }
+            // Fix: Set running = false, because we are exiting the chunk
+            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Failed at ${dateStr}: ${errorMessage}`, false, 0, failedDays);
+            // If auth required, stop immediately
+            if (errorType === "auth_required") {
+                blockedByAuth = true;
+                return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: true };
+            }
+            // If rate limited, stop processing this chunk to respect limits
+            if (errorType === "rate_limit") {
+                console.log("Rate limited during new day processing, stopping chunk.");
+                break; // Exit new day loop
+            }
+            // For other errors, we stop processing new days for this chunk to allow retries next time
+            break;
         }
 
-        processed++;
-        await updateState(env, fromDate, toDate, processed, totalDays, startedAt, dateStr, null, true, attempts);
+        processedNewDays++;
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, null, true, 0, failedDays);
 
         // Cache bust
         await invalidateHistoryCache(env);
@@ -650,11 +796,68 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
         currentDate.setDate(currentDate.getDate() - 1);
     }
 
-    // Finished
-    await updateState(env, fromDate, toDate, processed, totalDays, startedAt, "DONE", null, false);
+    // Update state one last time to reflect current progress and potentially mark as not running if done
+    // Fix: Set running = false, task is done
+    await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], null, false, 0, failedDays);
+
+    return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: blockedByAuth };
 }
 
-async function updateState(env: Env, from: Date, to: Date, processed: number, total: number, startedAt: string, lastDate: string, error: string | null, running: boolean = true, attempts: number = 0) {
+async function attemptSyncDay(env: Env, dateStr: string, retryCount: number): Promise<{ success: boolean, errorType: string, errorMessage: string, nextRetryAt: string | null }> {
+    try {
+        const status = await syncDay(env, dateStr);
+
+        if (status === 401) {
+            // Auth required - no automatic retry
+            return {
+                success: false,
+                errorType: "auth_required",
+                errorMessage: "Authentication required. Reconnect Fitbit account.",
+                nextRetryAt: null
+            };
+        }
+
+        if (status === 429) {
+            // Rate limit - schedule retry using exponential backoff
+            const delayMinutes = Math.min(60, Math.pow(2, retryCount) * 5); // 5, 10, 20, 40, 60 mins
+            const nextRetry = new Date(Date.now() + delayMinutes * 60000).toISOString();
+            return {
+                success: false,
+                errorType: "rate_limit",
+                errorMessage: `Rate limited. Next retry in ${delayMinutes} min`,
+                nextRetryAt: nextRetry
+            };
+        }
+
+        if (status >= 500) {
+            // Network error - exponential backoff
+            const delayMinutes = Math.min(30, Math.pow(2, retryCount) * 2); // 2, 4, 8, 16, 30 mins
+            const nextRetry = new Date(Date.now() + delayMinutes * 60000).toISOString();
+            return {
+                success: false,
+                errorType: "network",
+                errorMessage: `Server error ${status}. Retry in ${delayMinutes} min`,
+                nextRetryAt: nextRetry
+            };
+        }
+
+        // Success
+        return { success: true, errorType: "", errorMessage: "", nextRetryAt: null };
+
+    } catch (e: any) {
+        // Unknown error - exponential backoff
+        const delayMinutes = Math.min(30, Math.pow(2, retryCount) * 2);
+        const nextRetry = new Date(Date.now() + delayMinutes * 60000).toISOString();
+        return {
+            success: false,
+            errorType: "unknown",
+            errorMessage: e.message || "Unknown error",
+            nextRetryAt: nextRetry
+        };
+    }
+}
+
+async function updateState(env: Env, from: Date, to: Date, processed: number, total: number, startedAt: string, lastDate: string, error: string | null, running: boolean = true, attempts: number = 0, failedDays: Array<{ date: string, errorType: string, errorMessage: string, failedAt: string, nextRetryAt: string | null, retryCount: number }> = []) {
     const state: BackfillState = {
         running,
         from: from.toISOString().split('T')[0],
@@ -665,7 +868,8 @@ async function updateState(env: Env, from: Date, to: Date, processed: number, to
         startedAt: startedAt,
         updatedAt: new Date().toISOString(),
         lastError: error,
-        retries: attempts
+        retries: attempts,
+        failedDays: failedDays.length > 0 ? failedDays : undefined
     };
     await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
 }
@@ -1365,13 +1569,16 @@ function sanitizeDailyMetrics(date: string, raw: any): any {
 
 // --- Cron Stats Helper ---
 
-async function updateCronStats(env: Env, success: boolean, duration: number) {
+async function updateCronStats(env: Env, success: boolean, duration: number, details?: { newDays: number, retriedDays: number, blockedByAuth: boolean }) {
     const rawCheck = await env.FITBIT_KV.get("cron:stats");
     let stats = rawCheck ? JSON.parse(rawCheck) : {
         runs: 0,
         successes: 0,
         failures: 0,
-        avgDurationMs: 0
+        avgDurationMs: 0,
+        newDaysProcessed: 0,
+        retriedDaysProcessed: 0,
+        blockedByAuth: false
     };
 
     stats.runs++;
@@ -1383,17 +1590,38 @@ async function updateCronStats(env: Env, success: boolean, duration: number) {
         stats.failures++;
     }
 
+    if (details) {
+        stats.newDaysProcessed = (stats.newDaysProcessed || 0) + details.newDays;
+        stats.retriedDaysProcessed = (stats.retriedDaysProcessed || 0) + details.retriedDays;
+        stats.blockedByAuth = details.blockedByAuth;
+    }
+
+    // Add backfill retry info
+    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
+    if (rawProgress) {
+        const progress = JSON.parse(rawProgress);
+        stats.failedDaysCount = progress.failedDays ? progress.failedDays.length : 0;
+        if (progress.failedDays && progress.failedDays.length > 0 && progress.failedDays[0].nextRetryAt) {
+            stats.nextRetryAt = progress.failedDays[0].nextRetryAt;
+        } else {
+            stats.nextRetryAt = null;
+        }
+    } else {
+        stats.failedDaysCount = 0;
+        stats.nextRetryAt = null;
+    }
+
     await env.FITBIT_KV.put("cron:stats", JSON.stringify(stats));
 }
 
 // --- Automated Backfill Helper ---
 
-async function processAutomatedBackfillChunk(env: Env, ctx: ExecutionContext) {
+async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: number, retriedDays: number, blockedByAuth: boolean }> {
     const rawPlan = await env.FITBIT_KV.get("backfill:plan");
-    if (!rawPlan) return;
+    if (!rawPlan) return { newDays: 0, retriedDays: 0, blockedByAuth: false };
 
     const plan = JSON.parse(rawPlan) as BackfillPlan;
-    if (!plan.active) return;
+    if (!plan.active) return { newDays: 0, retriedDays: 0, blockedByAuth: false };
 
     // Determine Range
     const rawProgress = await env.FITBIT_KV.get("backfill:progress");
@@ -1425,12 +1653,11 @@ async function processAutomatedBackfillChunk(env: Env, ctx: ExecutionContext) {
         await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
 
         if (progress) {
-            // Mark progress DONE? Or just leave it at the date?
-            // Prompt says: "Sett plan.active false, Sett progress.lastProcessedDate = DONE"
-            await updateState(env, new Date(plan.targetSince), new Date(), progress.processedDays, progress.totalDays, progress.startedAt, "DONE", null, false);
+            // Mark progress DONE
+            await updateState(env, new Date(plan.targetSince), new Date(), progress.processedDays, progress.totalDays, progress.startedAt, "DONE", null, false, 0, progress.failedDays || []);
         }
         console.log("Backfill Plan Completed!");
-        return;
+        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
     }
 
     // Determine Chunk Size
@@ -1447,9 +1674,23 @@ async function processAutomatedBackfillChunk(env: Env, ctx: ExecutionContext) {
     console.log(`Running Backfill Chunk: ${fromDate.toISOString().split('T')[0]} to ${toDate.toISOString().split('T')[0]} (${diffDays} days)`);
 
     // Run Chunk
-    await processBackfill(env, fromDate, toDate, diffDays, plan.maxWallMs);
+    try {
+        const res = await processBackfill(env, fromDate, toDate, diffDays, plan.maxWallMs);
 
-    // Update Plan Timestamp
-    plan.updatedAt = new Date().toISOString();
-    await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+        // Update Plan Timestamp
+        plan.updatedAt = new Date().toISOString();
+        await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+
+        return res;
+    } finally {
+        // Safety Clean-up: Always ensure running is false when this chunk logic finishes
+        const rawEnd = await env.FITBIT_KV.get("backfill:progress");
+        if (rawEnd) {
+            const endState = JSON.parse(rawEnd);
+            if (endState.running) {
+                endState.running = false;
+                await env.FITBIT_KV.put("backfill:progress", JSON.stringify(endState));
+            }
+        }
+    }
 }
