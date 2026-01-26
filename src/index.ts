@@ -827,10 +827,10 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
                     blockedByAuth = true;
                     return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: true };
                 }
-                // If rate limited, stop processing this chunk to respect limits
+                // If rate limited, stop retry attempts but continue with new days
                 if (errorType === "rate_limit") {
-                    console.log("Rate limited during retry, stopping chunk processing.");
-                    break; // Exit retry loop, then new day loop
+                    console.log("Rate limited during retry, stopping retry attempts, will process new days.");
+                    break; // Exit retry loop, continue to new days
                 }
             }
         } else {
@@ -848,7 +848,8 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
 
     // Policy: Process new days (iterate backwards from toDate to fromDate)
     let currentDate = new Date(toDate);
-    const maxNewDaysPerTick = 7; // Limit new days processed per chunk
+    const maxNewDaysPerTick = 7; // Limit new days ATTEMPTED per tick (includes both successes and failures)
+    let attemptedNewDays = 0; // Track total attempts, not just successes
 
     // Find the last processed date from previous runs to avoid re-processing
     let lastProcessedDateFromState = initialState?.lastProcessedDate;
@@ -859,7 +860,7 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
         currentDate.setDate(currentDate.getDate() - 1);
     }
 
-    while (currentDate >= fromDate && processedNewDays < maxNewDaysPerTick) {
+    while (currentDate >= fromDate && attemptedNewDays < maxNewDaysPerTick) {
         // Check for Stop Signal
         const stopSignal = await env.FITBIT_KV.get("backfill:stop");
         if (stopSignal === "true") {
@@ -881,6 +882,9 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
             currentDate.setDate(currentDate.getDate() - 1);
             continue;
         }
+
+        // Count this as an attempt (success or failure)
+        attemptedNewDays++;
 
         const { success, errorType, errorMessage, nextRetryAt } = await attemptSyncDay(env, dateStr, 0);
 
@@ -905,29 +909,29 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
                 failedDays[existingFailedIdx].retryCount++;
                 failedDays[existingFailedIdx].retryCount++;
             }
-            // Fix: Set running = false, because we are exiting the chunk
-            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Failed at ${dateStr}: ${errorMessage}`, false, 0, failedDays);
-            // If auth required, stop immediately
+            // Update state after failure
+            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Failed at ${dateStr}: ${errorMessage}`, true, 0, failedDays);
+
+            // If auth required, stop immediately (only blocker)
             if (errorType === "auth_required") {
                 blockedByAuth = true;
                 return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: true };
             }
-            // If rate limited, stop processing this chunk to respect limits
-            if (errorType === "rate_limit") {
-                console.log("Rate limited during new day processing, stopping chunk.");
-                break; // Exit new day loop
-            }
-            // For other errors, we stop processing new days for this chunk to allow retries next time
-            break;
+
+            // For rate_limit and other errors: continue processing more days up to cap of 7
+            console.log(`Day ${dateStr} failed with ${errorType}, continuing to next day...`);
+
+            // Don't break - fall through to sleep and continue
+        } else {
+            // Success case
+            processedNewDays++;
+            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, null, true, 0, failedDays);
+
+            // Cache bust
+            await invalidateHistoryCache(env);
         }
 
-        processedNewDays++;
-        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, null, true, 0, failedDays);
-
-        // Cache bust
-        await invalidateHistoryCache(env);
-
-        // Sleep rate limit
+        // Sleep rate limit (regardless of success/failure)
         await new Promise(r => setTimeout(r, 250));
 
         // Decrement day
