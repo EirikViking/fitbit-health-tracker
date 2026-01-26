@@ -495,6 +495,31 @@ async function pollBackfillStatus() {
     run();
 }
 
+function fmtLocalDateTime(ts) {
+    if (!ts) return "—";
+    return new Date(ts).toLocaleString(undefined, {
+        year: 'numeric', month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: 'numeric', second: 'numeric'
+    });
+}
+
+function fmtAge(ts) {
+    if (!ts) return "";
+    const diff = Date.now() - new Date(ts).getTime();
+    if (isNaN(diff) || diff < 0) return "";
+    if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 172800000) return `${Math.floor(diff / 3600000)}h ago`;
+    return `${Math.floor(diff / 86400000)}d ago`;
+}
+
+function fmtLocalWithAge(ts) {
+    if (!ts) return "—";
+    const age = fmtAge(ts);
+    const local = fmtLocalDateTime(ts);
+    return age ? `${local} (${age})` : local;
+}
+
 function renderBackfillCard(data) {
     try {
         const card = $('backfillCard');
@@ -553,9 +578,7 @@ function renderBackfillCard(data) {
         $('bf-total').textContent = progress?.totalDays ?? 0;
         $('bf-remaining').textContent = estimatedRemainingDays ?? "--";
 
-        if (lastUpdatedAt) {
-            $('bf-updated-at').textContent = `Updated: ${new Date(lastUpdatedAt).toLocaleTimeString()}`;
-        }
+        $('bf-updated-at').textContent = fmtLocalWithAge(lastUpdatedAt || progress?.updatedAt);
 
         // Progress Bar
         if (progress && progress.totalDays > 0) {
@@ -572,12 +595,11 @@ function renderBackfillCard(data) {
             const err = failedDays[0];
             $('bf-error-type').textContent = err.errorType || "unknown";
             $('bf-error-msg').textContent = err.errorMessage || "--";
-            $('bf-error-date').textContent = err.date || "--";
+            $('bf-error-date').textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.failedAt);
             const retryRow = $('bf-next-retry-row');
             if (err.nextRetryAt) {
                 retryRow.classList.remove('hidden');
-                const date = new Date(err.nextRetryAt);
-                $('bf-next-retry').textContent = date.toLocaleTimeString();
+                $('bf-next-retry').textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
             } else {
                 retryRow.classList.add('hidden');
             }
