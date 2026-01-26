@@ -101,7 +101,7 @@ export default {
             return new Response(null, {
                 headers: {
                     "Access-Control-Allow-Origin": env.APP_BASE_URL || "*",
-                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                     "Access-Control-Allow-Headers": "Content-Type"
                 }
             });
@@ -122,10 +122,23 @@ export default {
             if (url.pathname === "/api/activity/timeseries") return handleActivityTimeSeries(request, env);
             if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
 
+            // Phase 2B: D1 History & Sync
+            if (url.pathname === "/api/sync") return handleSyncTrigger(request, env);
+            if (url.pathname === "/api/history") return handleHistory(request, env);
+            if (url.pathname === "/api/day") return handleDay(request, env);
+
             return new Response("Not Found", { status: 404 });
         } catch (e: any) {
             return new Response(`Error: ${e.message}`, { status: 500 });
         }
+    },
+
+    async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+        // Sync today and yesterday to capture late data updates
+        const today = new Date().toISOString().split('T')[0];
+        const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
+        ctx.waitUntil(Promise.all([syncDay(env, today), syncDay(env, yesterday)]));
     }
 };
 

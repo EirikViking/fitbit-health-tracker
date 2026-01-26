@@ -10,4 +10,6 @@ d1_databases = [
   { binding = "FITBIT_DB", database_name = "fitbit_health", database_id = "a4762736-497d-4bc9-96c0-b22cf25ecf36" }
 ]
 
+[triggers]
 crons = ["15 1 * * *"]
+
