@@ -876,15 +876,15 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
 
         const dateStr = currentDate.toISOString().split('T')[0];
 
+        // Count each day cursor advance (skip, attempt, or success)
+        attemptedNewDays++;
+
         // Skip if this day is already in failedDays and not due for retry (handled above)
         if (failedDays.some(f => f.date === dateStr && (new Date(f.nextRetryAt || 0).getTime() > Date.now()))) {
-            console.log(`Skipping new day ${dateStr} as it's a failed day not yet due for retry.`);
+            console.log(`[${attemptedNewDays}/${maxNewDaysPerTick}] Skipping ${dateStr} (pending retry ${failedDays.find(f => f.date === dateStr)?.nextRetryAt})`);
             currentDate.setDate(currentDate.getDate() - 1);
             continue;
         }
-
-        // Count this as an attempt (success or failure)
-        attemptedNewDays++;
 
         const { success, errorType, errorMessage, nextRetryAt } = await attemptSyncDay(env, dateStr, 0);
 
@@ -919,12 +919,13 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
             }
 
             // For rate_limit and other errors: continue processing more days up to cap of 7
-            console.log(`Day ${dateStr} failed with ${errorType}, continuing to next day...`);
+            console.log(`[${attemptedNewDays}/${maxNewDaysPerTick}] Day ${dateStr} failed with ${errorType}, continuing...`);
 
             // Don't break - fall through to sleep and continue
         } else {
             // Success case
             processedNewDays++;
+            console.log(`[${attemptedNewDays}/${maxNewDaysPerTick}] Day ${dateStr} synced successfully`);
             await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, null, true, 0, failedDays);
 
             // Cache bust
