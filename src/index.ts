@@ -384,16 +384,20 @@ async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, s
         headers: { Authorization: `Bearer ${tokens.access_token}` }
     });
 
-    if (!res.ok) {
-        if (res.status === 401) return { ok: false, status: 401, data: null };
-        try {
-            return { ok: false, status: res.status, data: await res.json() };
-        } catch {
-            return { ok: false, status: res.status, data: await res.text() };
-        }
+    const bodyText = await res.text();
+    let data;
+    try {
+        data = JSON.parse(bodyText);
+    } catch {
+        data = bodyText;
     }
 
-    const data = await res.json();
+    if (!res.ok) {
+        // If 401, we might just return the status, or the parsed error
+        if (res.status === 401) return { ok: false, status: 401, data: null };
+        return { ok: false, status: res.status, data };
+    }
+
     return { ok: true, status: 200, data };
 }
 
