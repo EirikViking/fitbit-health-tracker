@@ -142,6 +142,9 @@ export default {
             if (url.pathname === "/api/backfill") return handleBackfill(request, env, ctx);
             if (url.pathname === "/api/backfill/status") return handleBackfillStatus(request, env);
             if (url.pathname === "/api/backfill/stop") return handleBackfillStop(request, env);
+            if (url.pathname === "/api/backfill/plan/start") return handleBackfillPlanStart(request, env, ctx);
+            if (url.pathname === "/api/backfill/plan/stop") return handleBackfillPlanStop(request, env);
+            if (url.pathname === "/api/backfill/plan/status") return handleBackfillPlanStatus(request, env);
             if (url.pathname === "/api/cron/status") return handleCronStatus(request, env);
 
             return new Response("Not Found", { status: 404 });
@@ -191,6 +194,9 @@ export default {
 
             // C) Drift metrics
             await updateCronStats(env, error === null, Date.now() - start);
+
+            // D) Automated Backfill
+            await processAutomatedBackfillChunk(env, ctx);
         })());
     }
 };
@@ -285,7 +291,77 @@ async function handleBackfillStatus(req: Request, env: Env): Promise<Response> {
 async function handleBackfillStop(req: Request, env: Env): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
     await env.FITBIT_KV.put("backfill:stop", "true");
+    await env.FITBIT_KV.delete("backfill:plan"); // Stop plan too if manual stop
     return jsonResponse(env, { message: "Backfill stop signal sent" });
+}
+
+interface BackfillPlan {
+    active: boolean;
+    targetSince: string;
+    chunkDays: number;
+    maxWallMs: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    let body: any = {};
+    try { body = await req.json(); } catch { return new Response("Invalid JSON", { status: 400 }); }
+
+    const { since } = body;
+    if (!since || !/^\d{4}-\d{2}-\d{2}$/.test(since)) return new Response("Missing or invalid 'since' date (YYYY-MM-DD)", { status: 400 });
+
+    const plan: BackfillPlan = {
+        active: true,
+        targetSince: since,
+        chunkDays: 20,
+        maxWallMs: 20000,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+    };
+
+    await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+    await env.FITBIT_KV.delete("backfill:stop");
+
+    // Trigger first chunk immediately
+    ctx.waitUntil(processAutomatedBackfillChunk(env, ctx));
+
+    return jsonResponse(env, { message: "Backfill plan started", plan });
+}
+
+async function handleBackfillPlanStop(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
+    if (rawPlan) {
+        const plan = JSON.parse(rawPlan) as BackfillPlan;
+        plan.active = false;
+        await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+    }
+
+    await env.FITBIT_KV.put("backfill:stop", "true");
+    return jsonResponse(env, { message: "Backfill plan stopped" });
+}
+
+async function handleBackfillPlanStatus(req: Request, env: Env): Promise<Response> {
+    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
+    const plan = rawPlan ? JSON.parse(rawPlan) : null;
+
+    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
+    const progress = rawProgress ? JSON.parse(rawProgress) : null;
+
+    let estimatedRemainingDays = 0;
+    if (plan && plan.active && plan.targetSince && progress?.lastProcessedDate && progress.lastProcessedDate !== "DONE") {
+        const last = new Date(progress.lastProcessedDate);
+        const target = new Date(plan.targetSince);
+        if (last > target) {
+            estimatedRemainingDays = Math.ceil((last.getTime() - target.getTime()) / 86400000);
+        }
+    }
+
+    return jsonResponse(env, { plan, progress, estimatedRemainingDays });
 }
 
 async function handleCronStatus(req: Request, env: Env): Promise<Response> {
@@ -494,7 +570,7 @@ function csvResponse(headers: string[], rows: any[][], filename: string) {
     });
 }
 
-async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays: number) {
+async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays: number, maxTimeMs: number = 20000) {
     const startTime = Date.now();
     let currentDate = new Date(toDate); // Iterate backwards
     let processed = 0;
@@ -525,8 +601,8 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
             return;
         }
 
-        // Check for Time Limit (20s wall time)
-        if (Date.now() - startTime > 20000) {
+        // Check for Time Limit (variable)
+        if (Date.now() - startTime > maxTimeMs) {
             await updateState(env, fromDate, toDate, processed, totalDays, startedAt, currentDate.toISOString(), "Time limit exceeded", false);
             return;
         }
@@ -1308,4 +1384,72 @@ async function updateCronStats(env: Env, success: boolean, duration: number) {
     }
 
     await env.FITBIT_KV.put("cron:stats", JSON.stringify(stats));
+}
+
+// --- Automated Backfill Helper ---
+
+async function processAutomatedBackfillChunk(env: Env, ctx: ExecutionContext) {
+    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
+    if (!rawPlan) return;
+
+    const plan = JSON.parse(rawPlan) as BackfillPlan;
+    if (!plan.active) return;
+
+    // Determine Range
+    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
+    const progress = rawProgress ? JSON.parse(rawProgress) as BackfillState : null;
+
+    let toDate: Date;
+    if (progress && progress.lastProcessedDate && progress.lastProcessedDate !== "DONE") {
+        // Continue from last processed
+        const d = new Date(progress.lastProcessedDate);
+        d.setDate(d.getDate() - 1);
+        toDate = d;
+    } else if (progress && progress.lastProcessedDate === "DONE") {
+        // Was marked done previously? If plan is active maybe we wanted to restart?
+        // Assume restart from yesterday if we just started plan or ensure logic holds
+        // If plan is active, we should keep going if we haven't hit target
+        // But if progress says DONE, we need safety.
+        // Let's assume start from Yesterday if progress is DONE or missing
+        toDate = new Date(Date.now() - 86400000);
+    } else {
+        // No progress, start from yesterday
+        toDate = new Date(Date.now() - 86400000);
+    }
+
+    const targetDate = new Date(plan.targetSince);
+    if (toDate < targetDate) {
+        // We reached the target!
+        plan.active = false;
+        plan.updatedAt = new Date().toISOString();
+        await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+
+        if (progress) {
+            // Mark progress DONE? Or just leave it at the date?
+            // Prompt says: "Sett plan.active false, Sett progress.lastProcessedDate = DONE"
+            await updateState(env, new Date(plan.targetSince), new Date(), progress.processedDays, progress.totalDays, progress.startedAt, "DONE", null, false);
+        }
+        console.log("Backfill Plan Completed!");
+        return;
+    }
+
+    // Determine Chunk Size
+    const fromDate = new Date(toDate);
+    fromDate.setDate(fromDate.getDate() - (plan.chunkDays - 1));
+
+    // Clamp to target
+    if (fromDate < targetDate) {
+        fromDate.setTime(targetDate.getTime());
+    }
+
+    const diffDays = Math.ceil((toDate.getTime() - fromDate.getTime()) / 86400000) + 1;
+
+    console.log(`Running Backfill Chunk: ${fromDate.toISOString().split('T')[0]} to ${toDate.toISOString().split('T')[0]} (${diffDays} days)`);
+
+    // Run Chunk
+    await processBackfill(env, fromDate, toDate, diffDays, plan.maxWallMs);
+
+    // Update Plan Timestamp
+    plan.updatedAt = new Date().toISOString();
+    await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
 }
