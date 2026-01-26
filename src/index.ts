@@ -127,6 +127,9 @@ export default {
             if (url.pathname === "/api/health") return handleHealth(request, env);
 
             // Exports
+            if (url.pathname === "/api/export/daily") return handleExportDaily(request, env);
+            if (url.pathname === "/api/export/weekly") return handleExportWeekly(request, env);
+            if (url.pathname === "/api/export/monthly") return handleExportMonthly(request, env);
 
 
             // API Routes
@@ -575,6 +578,141 @@ async function handleHealth(req: Request, env: Env): Promise<Response> {
             cron_success: cron?.success,
             cron_reliability: stats ? (stats.successes / stats.runs).toFixed(2) : "1.00",
             backfill_running: backfill?.running
+        }
+    });
+}
+
+// --- Export Handlers ---
+
+async function handleExportDaily(req: Request, env: Env): Promise<Response> {
+    const { results } = await env.FITBIT_DB.prepare("SELECT * FROM daily_metrics ORDER BY date DESC").all();
+
+    // Header: date,restingHr,hrv,sleepMinutes,cardioLoad,cardioLoadStatus
+    const headers = ["date", "restingHr", "hrv", "sleepMinutes", "cardioLoad", "cardioLoadStatus"];
+    const rows = (results || []).map((r: any) => {
+        const s = sanitizeDailyMetrics(r.date, {
+            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
+        });
+        return [
+            r.date,
+            s.restingHr ?? "",
+            s.hrvRmssd ?? "",
+            s.sleepMinutes ?? "",
+            s.cardioLoad ?? "",
+            s.cardioLoadStatus ?? "missing"
+        ];
+    });
+
+    return csvResponse(headers, rows, `fitbit_daily_${new Date().toISOString().split('T')[0]}.csv`);
+}
+
+async function handleExportWeekly(req: Request, env: Env): Promise<Response> {
+    const { results } = await env.FITBIT_DB.prepare("SELECT * FROM daily_metrics ORDER BY date ASC").all();
+    const weeks = new Map<string, { count: number, restingHrSum: number, hrvSum: number, sleepSum: number }>();
+
+    // Simple aggregator
+    for (const r of (results || []) as any[]) {
+        const d = new Date(r.date);
+        // Get Monday of the week
+        const day = d.getDay();
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
+        const monday = new Date(d.setDate(diff));
+        const weekKey = monday.toISOString().split('T')[0];
+
+        const s = sanitizeDailyMetrics(r.date, {
+            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
+        });
+
+        if (!weeks.has(weekKey)) weeks.set(weekKey, { count: 0, restingHrSum: 0, hrvSum: 0, sleepSum: 0 });
+        const w = weeks.get(weekKey)!;
+
+        if (s.restingHr) { w.restingHrSum += s.restingHr; }
+        if (s.hrvRmssd) { w.hrvSum += s.hrvRmssd; }
+        if (s.sleepMinutes) { w.sleepSum += s.sleepMinutes; }
+        w.count++;
+        // Note: count is rough here, we should ideally count per-metric for correct averages. 
+        // But "Weekly/Monthly consistency" prompt C said "Reberegn aggregates". 
+        // We'll do a simplified avg based on days present. 
+        // Actually better to sum/count individually to be correct.
+    }
+
+    // Refined aggregation loop
+    const refinedWeeks = new Map<string, {
+        hrCount: number, hrSum: number,
+        hrvCount: number, hrvSum: number,
+        sleepCount: number, sleepSum: number
+    }>();
+
+    for (const r of (results || []) as any[]) {
+        const d = new Date(r.date);
+        const day = d.getDay();
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+        const monday = new Date(d.setDate(diff)).toISOString().split('T')[0];
+
+        if (!refinedWeeks.has(monday)) refinedWeeks.set(monday, { hrCount: 0, hrSum: 0, hrvCount: 0, hrvSum: 0, sleepCount: 0, sleepSum: 0 });
+        const w = refinedWeeks.get(monday)!;
+        const s = sanitizeDailyMetrics(r.date, {
+            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
+        });
+
+        if (s.restingHr) { w.hrSum += s.restingHr; w.hrCount++; }
+        if (s.hrvRmssd) { w.hrvSum += s.hrvRmssd; w.hrvCount++; }
+        if (s.sleepMinutes) { w.sleepSum += s.sleepMinutes; w.sleepCount++; }
+    }
+
+    const headers = ["weekStartDate", "restingHr", "hrv", "sleepMinutes"];
+    const rows = Array.from(refinedWeeks.entries()).sort().map(([date, w]) => [
+        date,
+        w.hrCount > 0 ? Math.round(w.hrSum / w.hrCount) : "",
+        w.hrvCount > 0 ? Math.round(w.hrvSum / w.hrvCount) : "",
+        w.sleepCount > 0 ? Math.round(w.sleepSum / w.sleepCount) : ""
+    ]);
+
+    return csvResponse(headers, rows, `fitbit_weekly_${new Date().toISOString().split('T')[0]}.csv`);
+}
+
+async function handleExportMonthly(req: Request, env: Env): Promise<Response> {
+    const { results } = await env.FITBIT_DB.prepare("SELECT * FROM daily_metrics ORDER BY date ASC").all();
+    const months = new Map<string, {
+        hrCount: number, hrSum: number,
+        hrvCount: number, hrvSum: number,
+        sleepCount: number, sleepSum: number
+    }>();
+
+    for (const r of (results || []) as any[]) {
+        const monthKey = r.date.substring(0, 7) + "-01"; // YYYY-MM-01
+        if (!months.has(monthKey)) months.set(monthKey, { hrCount: 0, hrSum: 0, hrvCount: 0, hrvSum: 0, sleepCount: 0, sleepSum: 0 });
+        const w = months.get(monthKey)!;
+        const s = sanitizeDailyMetrics(r.date, {
+            restingHr: r.resting_hr, hrvRmssd: r.hrv_rmssd, sleepMinutes: r.sleep_minutes
+        });
+
+        if (s.restingHr) { w.hrSum += s.restingHr; w.hrCount++; }
+        if (s.hrvRmssd) { w.hrvSum += s.hrvRmssd; w.hrvCount++; }
+        if (s.sleepMinutes) { w.sleepSum += s.sleepMinutes; w.sleepCount++; }
+    }
+
+    const headers = ["monthStartDate", "restingHr", "hrv", "sleepMinutes"];
+    const rows = Array.from(months.entries()).sort().map(([date, w]) => [
+        date,
+        w.hrCount > 0 ? Math.round(w.hrSum / w.hrCount) : "",
+        w.hrvCount > 0 ? Math.round(w.hrvSum / w.hrvCount) : "",
+        w.sleepCount > 0 ? Math.round(w.sleepSum / w.sleepCount) : ""
+    ]);
+
+    return csvResponse(headers, rows, `fitbit_monthly_${new Date().toISOString().split('T')[0]}.csv`);
+}
+
+function csvResponse(headers: string[], rows: any[][], filename: string) {
+    const csvContent = [
+        headers.join(","),
+        ...rows.map(row => row.join(","))
+    ].join("\n");
+
+    return new Response(csvContent, {
+        headers: {
+            "Content-Type": "text/csv",
+            "Content-Disposition": `attachment; filename="${filename}"`
         }
     });
 }
