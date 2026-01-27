@@ -7,6 +7,79 @@ let viewMode = 'calendar';
 let repairState = null;
 const $ = (id) => document.getElementById(id);
 
+// Tooltip Database
+const METRIC_TOOLTIPS = {
+    'restingHr': {
+        title: 'Resting Heart Rate',
+        description: 'Your heart rate when at complete rest. Lower values typically indicate better cardiovascular fitness and recovery.',
+        ideal: 'Ideal: 60-100 bpm (athletes: 40-60 bpm)'
+    },
+    'hrv': {
+        title: 'Heart Rate Variability',
+        description: 'Measures variation in time between heartbeats. Higher HRV indicates better recovery, stress management, and overall resilience.',
+        ideal: 'Ideal: >50 ms (varies by age and fitness)'
+    },
+    'sleep': {
+        title: 'Sleep Duration',
+        description: 'Total hours of sleep per night. Quality sleep is essential for recovery, cognitive function, and overall health.',
+        ideal: 'Ideal: 7-9 hours for adults'
+    },
+    'sleepEfficiency': {
+        title: 'Sleep Efficiency',
+        description: 'Percentage of time in bed actually spent asleep. Higher efficiency means better sleep quality with less time awake.',
+        ideal: 'Ideal: >85%'
+    },
+    'steps': {
+        title: 'Daily Steps',
+        description: 'Total steps taken throughout the day. A key indicator of daily activity level and general movement patterns.',
+        ideal: 'Ideal: 8,000-10,000 steps/day'
+    },
+    'calories': {
+        title: 'Calories Burned',
+        description: 'Total energy expenditure including basal metabolic rate and physical activity. Helps track energy balance.',
+        ideal: 'Varies by body composition and activity'
+    },
+    'azm': {
+        title: 'Active Zone Minutes',
+        description: 'Time spent in fat burn, cardio, or peak heart rate zones. Measures cardiovascular exercise intensity.',
+        ideal: 'Ideal: 150+ minutes/week (WHO guideline)'
+    },
+    'distance': {
+        title: 'Distance Traveled',
+        description: 'Total distance covered through walking, running, and other activities throughout the day.',
+        ideal: 'Varies by activity goals'
+    },
+    'recovery': {
+        title: 'Recovery Trend',
+        description: 'Composite view of HRV and resting heart rate trends. Improving = higher HRV + lower RHR. Helps guide training intensity.',
+        ideal: 'Look for consistent improvement over time'
+    },
+    'consistency': {
+        title: 'Sleep Consistency',
+        description: 'Measures variation in sleep duration across multiple nights. Lower variation indicates more stable sleep patterns.',
+        ideal: 'Low variation (±30-45 min) is optimal'
+    },
+    'insight': {
+        title: 'AI Insights',
+        description: 'Automated analysis of your trends and patterns. Highlights notable changes in key metrics over your selected period.',
+        ideal: 'Use insights to adjust habits and routines'
+    }
+};
+
+// Tooltip Helper Function
+function createTooltip(metricKey) {
+    const tooltip = METRIC_TOOLTIPS[metricKey];
+    if (!tooltip) return '';
+
+    return `
+        <div class="kpi-tooltip">
+            <div class="tooltip-title">${tooltip.title}</div>
+            <div class="tooltip-content">${tooltip.description}</div>
+            <div class="tooltip-ideal">${tooltip.ideal}</div>
+        </div>
+    `;
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -107,6 +180,48 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadDashboard();
     pollBackfillStatus();
+
+    // Drilldown handler - click KPI to view details
+    document.addEventListener('click', (e) => {
+        const kpiCard = e.target.closest('.kpi-card[data-drilldown]');
+
+        if (kpiCard) {
+            const targetTab = kpiCard.dataset.drilldown;
+
+            // On mobile with touch, check if tooltip was clicked
+            if ('ontouchstart' in window && !kpiCard.classList.contains('tooltip-active')) {
+                // First tap shows tooltip
+                document.querySelectorAll('.kpi-card.tooltip-active').forEach(card => {
+                    card.classList.remove('tooltip-active');
+                });
+                kpiCard.classList.add('tooltip-active');
+                return;
+            }
+
+            // Desktop or second tap on mobile - perform drilldown
+            if (targetTab) {
+                // Switch to target tab
+                switchTab(targetTab);
+
+                // Smooth scroll to top of page to see the content
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+
+                // Add pulse animation to target section
+                const targetPane = document.getElementById(`tab-${targetTab}`);
+                if (targetPane) {
+                    targetPane.style.animation = 'none';
+                    setTimeout(() => {
+                        targetPane.style.animation = 'pulse 0.6s ease-out';
+                    }, 10);
+                }
+            }
+        } else if ('ontouchstart' in window) {
+            // Mobile: click outside - close all tooltips
+            document.querySelectorAll('.kpi-card.tooltip-active').forEach(card => {
+                card.classList.remove('tooltip-active');
+            });
+        }
+    });
 });
 
 // Period toggle function
@@ -982,7 +1097,7 @@ function renderKPIs(data) {
     const prev = rows.length > 1 ? rows[rows.length - 2] : null;
 
     // Helper for rendering cards
-    const renderCard = (title, unit, key, higherIsBetter = true) => {
+    const renderCard = (title, unit, key, higherIsBetter = true, tooltipKey = null, drilldownTarget = null) => {
         const val = safeNumber(last[key]);
         const prevVal = prev ? safeNumber(prev[key]) : null;
 
@@ -1008,11 +1123,20 @@ function renderKPIs(data) {
             else displayVal = val.toLocaleString(undefined, { maximumFractionDigits: 1 });
         }
 
+        // Add tooltip if key provided
+        const tooltip = tooltipKey ? createTooltip(tooltipKey) : '';
+
+        // Add drilldown data attribute
+        const drilldownAttr = drilldownTarget ? `data-drilldown="${drilldownTarget}"` : '';
+        const drilldownHint = drilldownTarget ? '<div class="drilldown-hint">Click to view details →</div>' : '';
+
         return `
-        <div class="kpi-card">
+        <div class="kpi-card" ${drilldownAttr}>
             <div class="kpi-title">${title}</div>
             <div class="kpi-value">${displayVal} <span style="font-size:1rem;font-weight:400;color:#666">${unit}</span></div>
             <div class="kpi-meta">${trendHtml}</div>
+            ${drilldownHint}
+            ${tooltip}
         </div>
         `;
     };
@@ -1035,9 +1159,9 @@ function renderKPIs(data) {
 
     // 2. Standard Cards
     const standardCards = [
-        renderCard('Resting HR', 'bpm', 'restingHr', false),
-        renderCard('Sleep Duration', 'hrs', 'sleepMinutes', true),
-        renderCard('HRV (RMSSD)', 'ms', 'hrv', true)
+        renderCard('Resting HR', 'bpm', 'restingHr', false, 'restingHr', 'recovery'),
+        renderCard('Sleep Duration', 'hrs', 'sleepMinutes', true, 'sleep', 'sleep'),
+        renderCard('HRV (RMSSD)', 'ms', 'hrv', true, 'hrv', 'recovery')
     ].join('');
 
     // 3. Recovery Today (Using aggregated/safe data)
@@ -1061,13 +1185,15 @@ function renderKPIs(data) {
     }
 
     const recHtml = `
-        <div class="kpi-card" style="border-left: 4px solid var(--primary-color);">
+        <div class="kpi-card" data-drilldown="recovery" style="border-left: 4px solid var(--primary-color); cursor: pointer;">
             <div class="kpi-title">Recovery Trend</div>
             <div style="margin-bottom:0.5rem"><span class="badge ${recClass}">${recStatus}</span></div>
             <div class="stat-block">
                 <div class="text-sm">RHR: <strong>${fmtKPI(curR, '')}</strong></div>
                 <div class="text-sm">HRV: <strong>${fmtKPI(curH, '')}</strong></div>
             </div>
+            <div class="drilldown-hint">Click to view details →</div>
+            ${createTooltip('recovery')}
         </div>
     `;
 
@@ -1103,6 +1229,7 @@ function renderKPIs(data) {
             <ul style="padding-left:1.2rem; margin-top:0.5rem; font-size:0.85rem; color:var(--text-main);">
                 ${insights.slice(0, 3).map(i => `<li style="margin-bottom:0.25rem">${i}</li>`).join('')}
             </ul>
+            ${createTooltip('insight')}
         </div>
     `;
 
@@ -1182,15 +1309,18 @@ function renderSleepTab(data) {
             </div>
             <div class="kpi-value">${currSleep ? (currSleep / 60).toFixed(1) : '--'} <span style="font-size:1rem;color:#666">hrs</span></div>
             <div class="kpi-meta">${trendHtml}</div>
+            ${createTooltip('sleep')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Period Consistency</div>
             <div style="margin-top:0.5rem"><span class="badge ${badgeClass}">${consistencyLabel}</span></div>
             <div class="text-xs" style="margin-top:0.5rem">Var across visible ${currentPeriod}s</div>
+            ${createTooltip('consistency')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Range</div>
             ${bestWorstHtml}
+            ${createTooltip('sleep')}
         </div>
     `;
 }
@@ -1236,16 +1366,19 @@ function renderRecoveryTab(data) {
             </div>
             <div style="margin-top:0.5rem"><span class="badge ${badgeClass}">${status}</span></div>
             <div class="text-sm" style="margin-top:0.5rem">${insight}</div>
+            ${createTooltip('recovery')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Avg RHR</div>
             <div class="kpi-value">${fmtKPI(rhrCurr, '', 0)} <span class="text-sm">bpm</span></div>
             <div class="kpi-meta text-xs">vs ${fmtKPI(rhrPrev, '', 0)} prev</div>
+            ${createTooltip('restingHr')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Avg HRV</div>
             <div class="kpi-value">${fmtKPI(hrvCurr, '', 0)} <span class="text-sm">ms</span></div>
             <div class="kpi-meta text-xs">vs ${fmtKPI(hrvPrev, '', 0)} prev</div>
+            ${createTooltip('hrv')}
         </div>
     `;
 }
@@ -1276,18 +1409,21 @@ function renderActivityTab(data) {
             <div class="kpi-value">${(steps / 1000).toFixed(1)}k</div>
             <div class="text-sm">Period Total (${count}d)</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(steps / count).toLocaleString()}/day</div>` : ''}
+            ${createTooltip('steps')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Calories</div>
             <div class="kpi-value">${(cals / 1000).toFixed(1)}k</div>
             <div class="text-sm">Period Total</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(cals / count).toLocaleString()}/day</div>` : ''}
+            ${createTooltip('calories')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Active Mins</div>
             <div class="kpi-value">${azm}</div>
             <div class="text-sm">Period Total (AZM)</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
+            ${createTooltip('azm')}
         </div>
         <div style="grid-column:1/-1">
            ${repairHtml}
