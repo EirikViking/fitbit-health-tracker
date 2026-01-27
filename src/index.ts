@@ -1324,23 +1324,24 @@ async function syncDay(env: Env, date: string): Promise<number> {
     const distanceKm = summary.distances?.find((d: any) => d.activity === "total")?.distance || 0;
 
     // Parse AZM
-    // Strict order: Resource -> total activeZoneMinutes -> Sum of parts
+    // Priority A: Resource total (if finite number)
+    // Priority B: Breakdown sum fallback
+    // Priority C: 0
+    let azm = 0;
     const azmList = azmRes.data?.["activities-active-zone-minutes"];
     const azmEntry = azmList && azmList[0];
-    let azm = 0;
 
     if (azmEntry?.value) {
-        if (typeof azmEntry.value === 'number') {
-            // Direct number in some formats
+        if (typeof azmEntry.value === 'number' && Number.isFinite(azmEntry.value)) {
             azm = azmEntry.value;
-        } else if (typeof azmEntry.value.activeZoneMinutes === 'number') {
-            // Explicit total
+        } else if (typeof azmEntry.value?.activeZoneMinutes === 'number' && Number.isFinite(azmEntry.value.activeZoneMinutes)) {
             azm = azmEntry.value.activeZoneMinutes;
         } else {
-            // Fallback: Sum parts if explicit total is missing
-            azm = (azmEntry.value.fatBurnActiveZoneMinutes || 0) +
-                (azmEntry.value.cardioActiveZoneMinutes || 0) +
-                (azmEntry.value.peakActiveZoneMinutes || 0);
+            // Fallback: Sum parts
+            const fatBurn = azmEntry.value?.fatBurnActiveZoneMinutes || 0;
+            const cardio = azmEntry.value?.cardioActiveZoneMinutes || 0;
+            const peak = azmEntry.value?.peakActiveZoneMinutes || 0;
+            azm = fatBurn + cardio + peak;
         }
     }
 
@@ -1359,53 +1360,51 @@ async function syncDay(env: Env, date: string): Promise<number> {
     }
 
     // Parse Sleep
-    // Strict rules: 
-    // 1. Detailed logs first (Sum of minutesAsleep for all entries matching date)
-    // 2. Summary totalMinutesAsleep second
-    // 3. NO totalTimeInBed, NO duration (unless minutesAsleep is missing in log)
+    // Priority A: Detailed logs (sum minutesAsleep for targetDate)
+    // Priority B: Summary fallback (totalMinutesAsleep)
+    // Priority C: 0
+    // Hard rule: never use totalTimeInBed or duration for sleepMinutes.
 
-    let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
+    let sleepMinutes = 0;
+    // We keep other sleep stats for DB consistency but logic for sleepMinutes is strict
+    let timeInBed = 0;
+    let efficiency = 0;
     let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
 
-    let hasDetailedLogs = false;
-    if (sleepRes.ok && Array.isArray(sleepRes.data?.sleep) && sleepRes.data.sleep.length > 0) {
-        hasDetailedLogs = true;
+    let sleepFoundInDetails = false;
 
-        // Filter entries to ensure they belong to this date (Fitbit dateOfSleep)
+    if (sleepRes.ok && Array.isArray(sleepRes.data?.sleep)) {
+        // A) Detailed logs
         const relevantEntries = sleepRes.data.sleep.filter((s: any) => s.dateOfSleep === date);
 
         if (relevantEntries.length > 0) {
-            // Sum up minutesAsleep
-            sleepMinutes = relevantEntries.reduce((sum: number, s: any) => sum + (s.minutesAsleep || 0), 0);
+            sleepFoundInDetails = true;
+            sleepMinutes = relevantEntries.reduce((sum: number, s: any) => sum + (Number(s.minutesAsleep) || 0), 0);
 
-            // Taking main sleep for efficiency/stages stats
+            // Capture other stats from main sleep (best effort)
             const mainSleep = relevantEntries.find((s: any) => s.isMainSleep) || relevantEntries[0];
-            timeInBed = (mainSleep.timeInBed || 0);
+            timeInBed = mainSleep.timeInBed || 0;
             efficiency = mainSleep.efficiency || 0;
-
             if (mainSleep.levels?.summary) {
                 sDeep = mainSleep.levels.summary.deep?.minutes || 0;
                 sLight = mainSleep.levels.summary.light?.minutes || 0;
                 sRem = mainSleep.levels.summary.rem?.minutes || 0;
                 sWake = mainSleep.levels.summary.wake?.minutes || 0;
             }
-        } else {
-            // Edge case: data array has entries but none match dateOfSleep?
-            // Fallback to summary
-            hasDetailedLogs = false;
         }
     }
 
-    if (!hasDetailedLogs && sleepRes.ok && sleepRes.data?.summary) {
-        // Fallback to summary
-        sleepMinutes = sleepRes.data.summary.totalMinutesAsleep || 0;
-        // Ignoring totalTimeInBed as requested for duration
+    if (!sleepFoundInDetails && sleepRes.ok && sleepRes.data?.summary?.totalMinutesAsleep) {
+        // B) Summary fallback
+        const summaryVal = sleepRes.data.summary.totalMinutesAsleep;
+        if (Number.isFinite(summaryVal)) {
+            sleepMinutes = summaryVal;
+        }
     }
 
-    // Final sanity check
-    if (sleepMinutes === 0 && sleepRes.ok && sleepRes.data?.summary?.totalMinutesAsleep > 0) {
-        sleepMinutes = sleepRes.data.summary.totalMinutesAsleep;
-    }
+    // Final Coercion
+    sleepMinutes = Number.isFinite(sleepMinutes) ? sleepMinutes : 0;
+    azm = Number.isFinite(azm) ? azm : 0;
 
     try {
         await env.FITBIT_DB.prepare(`
