@@ -1406,6 +1406,26 @@ async function syncDay(env: Env, date: string): Promise<number> {
     sleepMinutes = Number.isFinite(sleepMinutes) ? sleepMinutes : 0;
     azm = Number.isFinite(azm) ? azm : 0;
 
+    // Debug for 2026-01-27 only
+    if (date === "2026-01-27") {
+        console.log(`[DEBUG 2026-01-27] Sleep Payload Keys: ${Object.keys(sleepRes.data || {}).join(',')}`);
+        if (sleepRes.data?.sleep) {
+            console.log(`[DEBUG 2026-01-27] Sleep Entries: ${sleepRes.data.sleep.length}`);
+            const entries = sleepRes.data.sleep.filter((s: any) => s.dateOfSleep === date);
+            console.log(`[DEBUG 2026-01-27] Matching Entries: ${entries.length}`);
+            console.log(`[DEBUG 2026-01-27] Entries Mins: ${entries.map((e: any) => e.minutesAsleep).join(',')}`);
+        }
+        console.log(`[DEBUG 2026-01-27] Computed SleepMinutes: ${sleepMinutes}`);
+
+        const azmD = azmRes.data?.["activities-active-zone-minutes"];
+        console.log(`[DEBUG 2026-01-27] AZM Payload Keys: ${Object.keys(azmRes.data || {}).join(',')}`);
+        if (azmD && azmD[0]) {
+            console.log(`[DEBUG 2026-01-27] AZM[0] Value Type: ${typeof azmD[0].value}`);
+            console.log(`[DEBUG 2026-01-27] AZM[0] Value Keys: ${typeof azmD[0].value === 'object' ? Object.keys(azmD[0].value).join(',') : 'N/A'}`);
+        }
+        console.log(`[DEBUG 2026-01-27] Computed AZM: ${azm}`);
+    }
+
     try {
         await env.FITBIT_DB.prepare(`
         INSERT INTO daily_metrics (
