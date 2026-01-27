@@ -72,6 +72,36 @@ window.switchTab = function (tabName) {
 };
 
 // Data normalization
+// --- Helpers ---
+function safeNumber(val) {
+    if (val === null || val === undefined || isNaN(val)) return null;
+    return Number(val);
+}
+
+function fmtKPI(val, unit, digits = 1) {
+    if (val === null || val === undefined) return '—';
+    return Number(val).toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+function pctChange(curr, prev) {
+    const c = safeNumber(curr);
+    const p = safeNumber(prev);
+    if (c === null || p === null || p === 0) return null;
+    return ((c - p) / p) * 100;
+}
+
+function calcCoverage(bucket) {
+    if (!bucket) return 0;
+    // If daily, it's 100% if exists
+    if (currentPeriod === 'daily') return 100;
+
+    // For weekly/monthly, ratio of contributed vs expected
+    const expected = bucket.expectedDays || 1;
+    const actual = bucket.days || 0;
+    return Math.min(100, Math.round((actual / expected) * 100));
+}
+
+// Data normalization
 function weekKeyToISODate(weekKey) {
     const [year, week] = weekKey.split('-W').map(Number);
     const jan4 = new Date(year, 0, 4);
@@ -84,7 +114,11 @@ function monthKeyToISODate(monthKey) {
     return `${monthKey}-01`;
 }
 
-function aggregateMetrics(series, keyFn) {
+function getDaysInMonth(year, monthIndex) {
+    return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function aggregateMetrics(series, keyFn, type) {
     if (!Array.isArray(series) || series.length === 0) return {};
     const map = {};
 
@@ -93,8 +127,17 @@ function aggregateMetrics(series, keyFn) {
         const key = keyFn(d.date);
 
         if (!map[key]) {
+            // Calculate expected days
+            let expected = 1;
+            if (type === 'weekly') expected = 7;
+            if (type === 'monthly') {
+                const [y, m] = key.split('-').map(Number); // YYYY-MM
+                expected = getDaysInMonth(y, m - 1);
+            }
+
             map[key] = {
                 count: 0,
+                expectedDays: expected,
                 restingHrSum: 0, restingHrCount: 0,
                 hrvSum: 0, hrvCount: 0,
                 sleepSum: 0, sleepCount: 0,
@@ -126,13 +169,21 @@ function aggregateMetrics(series, keyFn) {
         result[k] = {
             restingHr: m.restingHrCount > 0 ? m.restingHrSum / m.restingHrCount : null,
             hrv: m.hrvCount > 0 ? m.hrvSum / m.hrvCount : null,
-            sleepMinutes: m.sleepCount > 0 ? m.sleepSum / m.sleepCount : null, // keep total mins? No, avg sleep duration per night is better for weekly/monthly bars.
-            totalSleepMinutes: m.sleepSum, // Keep total for consistency check if needed
-            steps: m.steps, // Sum
-            caloriesOut: m.caloriesOut, // Sum
-            distanceKm: m.distanceKm, // Sum
-            azm: m.azm, // Sum
-            days: m.count
+            sleepMinutes: m.sleepCount > 0 ? m.sleepSum / m.sleepCount : null,
+            totalSleepMinutes: m.sleepSum,
+            steps: m.steps,
+            caloriesOut: m.caloriesOut,
+            distanceKm: m.distanceKm,
+            azm: m.azm,
+            days: m.count,
+            expectedDays: m.expectedDays,
+
+            // Coverage stats per metric
+            coverage: {
+                hr: m.restingHrCount,
+                hrv: m.hrvCount,
+                sleep: m.sleepCount
+            }
         };
     });
     return result;
@@ -151,7 +202,9 @@ function normalizeForPeriod(dashboardData, period) {
             steps: d.steps,
             caloriesOut: d.caloriesOut,
             distanceKm: d.distanceKm,
-            azm: d.azm
+            azm: d.azm,
+            days: 1,
+            expectedDays: 1
         }));
     }
 
@@ -164,7 +217,7 @@ function normalizeForPeriod(dashboardData, period) {
             const daysSinceJan4 = (date - jan4) / 86400000;
             const weekNum = Math.ceil((daysSinceJan4 + jan4.getUTCDay() + 1) / 7);
             return `${year}-W${String(weekNum).padStart(2, '0')}`;
-        });
+        }, 'weekly');
         return Object.entries(map).map(([key, m]) => ({
             date: weekKeyToISODate(key),
             ...m
@@ -172,7 +225,7 @@ function normalizeForPeriod(dashboardData, period) {
     }
 
     if (period === 'monthly') {
-        map = aggregateMetrics(series, (dateStr) => dateStr.slice(0, 7));
+        map = aggregateMetrics(series, (dateStr) => dateStr.slice(0, 7), 'monthly');
         return Object.entries(map).map(([key, m]) => ({
             date: monthKeyToISODate(key),
             ...m
@@ -242,23 +295,22 @@ function renderCharts() {
     if (!dashboardData) return;
 
     // Normalize data for current period
-    const rows = normalizeForPeriod(dashboardData, currentPeriod);
+    const rows = normalizeForPeriod(dashboardData, currentPeriod) || [];
 
-    // Defensive empty case
+    // Clean up if empty
     if (rows.length === 0) {
-        console.warn(`[charts] no rows for period ${currentPeriod}`);
-        // Clear existing charts
-        if (charts.hr) charts.hr.destroy();
-        if (charts.sleep) charts.sleep.destroy();
-        if (charts.hrv) charts.hrv.destroy();
+        // if we have chart instances, clear data but don't crash
+        if (charts.hr) { charts.hr.data.datasets[0].data = []; charts.hr.update(); }
+        if (charts.sleep) { charts.sleep.data.datasets[0].data = []; charts.sleep.update(); }
+        if (charts.hrv) { charts.hrv.data.datasets[0].data = []; charts.hrv.update(); }
         return;
     }
 
     // Build labels and numeric arrays
     const labels = rows.map(r => r.date);
-    const resting = rows.map(r => Number(r.restingHr) || null);
-    const sleep = rows.map(r => Number(r.sleepMinutes) || null);
-    const hrv = rows.map(r => Number(r.hrv) || null);
+    const resting = rows.map(r => safeNumber(r.restingHr));
+    const sleep = rows.map(r => safeNumber(r.sleepMinutes));
+    const hrv = rows.map(r => safeNumber(r.hrv));
 
     // Config
     Chart.defaults.font.family = "'Inter', sans-serif";
@@ -268,7 +320,7 @@ function renderCharts() {
     const ctxSleep = $('chartSleep').getContext('2d');
     const ctxHRV = $('chartHRV').getContext('2d');
 
-    // Destroy existing
+    // Destroy existing if needed to resize or full reset
     if (charts.hr) charts.hr.destroy();
     if (charts.sleep) charts.sleep.destroy();
     if (charts.hrv) charts.hrv.destroy();
@@ -347,7 +399,11 @@ function createChartOptions(unit, fullData) {
                 mode: 'index',
                 intersect: false,
                 callbacks: {
-                    label: (ctx) => `${ctx.dataset.label}: ${ctx.raw} ${unit}`
+                    label: (ctx) => {
+                        const val = ctx.raw;
+                        if (val === null || val === undefined) return null;
+                        return `${ctx.dataset.label}: ${Number(val).toFixed(1)} ${unit}`;
+                    }
                 }
             }
         },
@@ -364,7 +420,6 @@ function createChartOptions(unit, fullData) {
         }
     };
 }
-
 // Fetch single day details
 async function showDayDetails(date) {
     try {
@@ -713,7 +768,7 @@ function renderKPIs(data) {
     const kpiGrid = $('overviewKPIs');
     if (!kpiGrid || !data) return;
 
-    const rows = normalizeForPeriod(data, currentPeriod);
+    const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) {
         kpiGrid.innerHTML = '<p style="grid-column:1/-1;color:var(--text-secondary);">No data available for insights.</p>';
         return;
@@ -724,11 +779,12 @@ function renderKPIs(data) {
 
     // Helper for rendering cards
     const renderCard = (title, unit, key, higherIsBetter = true) => {
-        const val = last[key];
-        const prevVal = prev ? prev[key] : null;
+        const val = safeNumber(last[key]);
+        const prevVal = prev ? safeNumber(prev[key]) : null;
 
-        let trendHtml = '<span style="color:#ccc">&ndash;</span>';
-        if (val != null && prevVal != null) {
+        let trendHtml = '<span style="color:#ccc; font-size:0.8rem">Not enough data</span>';
+
+        if (val !== null && prevVal !== null) {
             const diff = val - prevVal;
             const up = diff > 0;
             const symbol = up ? '↑' : '↓';
@@ -742,10 +798,10 @@ function renderKPIs(data) {
             trendHtml = `<span class="${colorClass}">${symbol} ${diffFmt} vs prev</span>`;
         }
 
-        let displayVal = '--';
-        if (val != null) {
+        let displayVal = '—';
+        if (val !== null) {
             if (key === 'sleepMinutes') displayVal = (val / 60).toFixed(1);
-            else displayVal = Number(val).toLocaleString(undefined, { maximumFractionDigits: 1 });
+            else displayVal = val.toLocaleString(undefined, { maximumFractionDigits: 1 });
         }
 
         return `
@@ -758,10 +814,13 @@ function renderKPIs(data) {
     };
 
     // 1. Data Coverage Chip
+    const coverageVal = calcCoverage(last);
+    const lastDate = last.date || 'Unknown';
     const coverageHtml = `
-        <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: flex-end;">
-            <span class="badge badge-neutral" style="font-weight: 500; font-size: 0.75rem;">
-                Granularity: ${currentPeriod.charAt(0).toUpperCase() + currentPeriod.slice(1)}
+        <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items:center;">
+             <span style="font-size:0.75rem; color:var(--text-secondary);">Latest: ${lastDate}</span>
+             <span class="badge ${coverageVal < 50 ? 'badge-strained' : 'badge-neutral'}" style="font-weight: 500; font-size: 0.75rem;">
+                Coverage: ${coverageVal}% (${currentPeriod})
             </span>
         </div>
     `;
@@ -773,16 +832,21 @@ function renderKPIs(data) {
         renderCard('HRV (RMSSD)', 'ms', 'hrv', true)
     ].join('');
 
-    // 3. Recovery Today (Using aggregated data)
+    // 3. Recovery Today (Using aggregated/safe data)
     let recStatus = 'Neutral';
     let recClass = 'badge-neutral';
 
-    // Aggregated Recovery Logic
-    if (last.restingHr && last.hrv && prev && prev.restingHr && prev.hrv) {
-        if (last.hrv >= prev.hrv && last.restingHr <= prev.restingHr) {
+    // Check safety
+    const curR = safeNumber(last.restingHr);
+    const curH = safeNumber(last.hrv);
+    const preR = prev ? safeNumber(prev.restingHr) : null;
+    const preH = prev ? safeNumber(prev.hrv) : null;
+
+    if (curR && curH && preR && preH) {
+        if (curH >= preH && curR <= preR) {
             recStatus = 'Recovering';
             recClass = 'badge-recovered';
-        } else if (last.hrv < prev.hrv && last.restingHr > prev.restingHr) {
+        } else if (curH < preH && curR > preR) {
             recStatus = 'Straining';
             recClass = 'badge-strained';
         }
@@ -793,20 +857,19 @@ function renderKPIs(data) {
             <div class="kpi-title">Recovery Trend</div>
             <div style="margin-bottom:0.5rem"><span class="badge ${recClass}">${recStatus}</span></div>
             <div class="stat-block">
-                <div class="text-sm">RHR: <strong>${last.restingHr ? Math.round(last.restingHr) : '--'}</strong></div>
-                <div class="text-sm">HRV: <strong>${last.hrv ? Math.round(last.hrv) : '--'}</strong></div>
+                <div class="text-sm">RHR: <strong>${fmtKPI(curR, '')}</strong></div>
+                <div class="text-sm">HRV: <strong>${fmtKPI(curH, '')}</strong></div>
             </div>
         </div>
     `;
 
-    // 4. Insights (Period Aware)
-    // Check variation in the *rows* displayed (last 5 periods)
+    // 4. Insights (Period Aware, Safe)
     const relevantRows = rows.slice(-5);
     const insights = [];
 
     // Simple slope check
     if (relevantRows.length >= 3) {
-        const hrvTrend = relevantRows.map(r => r.hrv).filter(v => v > 0);
+        const hrvTrend = relevantRows.map(r => safeNumber(r.hrv)).filter(v => v !== null);
         if (hrvTrend.length >= 3) {
             const start = hrvTrend[0];
             const end = hrvTrend[hrvTrend.length - 1];
@@ -816,9 +879,10 @@ function renderKPIs(data) {
     }
 
     // Activity Check
-    if (last.steps > 0) {
-        if (last.steps < 5000 && currentPeriod === 'daily') insights.push("Low activity today.");
-        if (last.steps > 10000 && currentPeriod === 'daily') insights.push("Good activity levels!");
+    const steps = safeNumber(last.steps);
+    if (steps !== null) {
+        if (steps < 5000 && currentPeriod === 'daily') insights.push("Low activity today.");
+        if (steps > 10000 && currentPeriod === 'daily') insights.push("Good activity levels!");
     } else {
         insights.push("No activity data for this period.");
     }
@@ -847,36 +911,35 @@ function renderKPIs(data) {
 function renderSleepTab(data) {
     const container = $('sleepMetrics');
     if (!container || !data) return;
-    const rows = normalizeForPeriod(data, currentPeriod);
+    const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) return;
 
     const last = rows[rows.length - 1];
     const prev = rows.length > 1 ? rows[rows.length - 2] : null;
 
-    // 1. Avg Sleep (for this period)
-    const currSleep = last.sleepMinutes;
-    const prevSleep = prev ? prev.sleepMinutes : null;
+    // 1. Avg Sleep
+    const currSleep = safeNumber(last.sleepMinutes);
+    const prevSleep = prev ? safeNumber(prev.sleepMinutes) : null;
 
     let trendHtml = '<span class="text-xs">No trend data</span>';
-    if (currSleep && prevSleep) {
+    if (currSleep !== null && prevSleep !== null) {
         const diff = currSleep - prevSleep;
         const symbol = diff > 0 ? '↑' : (diff < 0 ? '↓' : '→');
         const color = diff > 0 ? 'trend-up' : 'trend-down';
         trendHtml = `<span class="${color}">${symbol} ${Math.abs(diff / 60).toFixed(1)}h vs prev</span>`;
     }
 
-    // 2. Consistency (Std Dev)
-    // Calculate StdDev of the *periods* shown (variation between weeks/days)
-    const periodsToCheck = rows.slice(-10).map(r => r.sleepMinutes).filter(v => v > 0);
+    // 2. Consistency
+    const periodsToCheck = rows.slice(-10).map(r => safeNumber(r.sleepMinutes)).filter(v => v !== null && v > 0);
     let consistencyLabel = 'Insufficient data';
     let badgeClass = 'badge-neutral';
 
+    let stdDev = 0;
     if (periodsToCheck.length >= 3) {
         const mean = periodsToCheck.reduce((a, b) => a + b, 0) / periodsToCheck.length;
         const variance = periodsToCheck.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / periodsToCheck.length;
-        const stdDev = Math.sqrt(variance);
+        stdDev = Math.sqrt(variance);
 
-        // Thresholds in mins: <45 High, <90 Med, >90 Low
         if (stdDev < 45) { consistencyLabel = 'High Consistency'; badgeClass = 'badge-high'; }
         else if (stdDev < 90) { consistencyLabel = 'Medium Consistency'; badgeClass = 'badge-med'; }
         else { consistencyLabel = 'Low Consistency'; badgeClass = 'badge-low'; }
@@ -884,8 +947,8 @@ function renderSleepTab(data) {
         consistencyLabel += ` (±${Math.round(stdDev)}m)`;
     }
 
-    // 3. Best/Worst of shown periods
-    const validRows = rows.filter(r => r.sleepMinutes > 0);
+    // 3. Best/Worst
+    const validRows = rows.filter(r => safeNumber(r.sleepMinutes) !== null && r.sleepMinutes > 0);
     let bestWorstHtml = '<div class="text-sm">Not enough data</div>';
     if (validRows.length > 0) {
         const max = validRows.reduce((p, c) => p.sleepMinutes > c.sleepMinutes ? p : c);
@@ -898,9 +961,15 @@ function renderSleepTab(data) {
         `;
     }
 
+    // Coverage
+    const cvg = calcCoverage(last);
+
     container.innerHTML = `
         <div class="kpi-card">
-            <div class="kpi-title">${currentPeriod === 'daily' ? 'Sleep Duration' : 'Avg Sleep / Night'}</div>
+            <div style="display:flex;justify-content:space-between;">
+                <div class="kpi-title">${currentPeriod === 'daily' ? 'Sleep Duration' : 'Avg Sleep / Night'}</div>
+                 <div class="text-xs text-secondary">Cov: ${cvg}%</div>
+            </div>
             <div class="kpi-value">${currSleep ? (currSleep / 60).toFixed(1) : '--'} <span style="font-size:1rem;color:#666">hrs</span></div>
             <div class="kpi-meta">${trendHtml}</div>
         </div>
@@ -919,16 +988,16 @@ function renderSleepTab(data) {
 function renderRecoveryTab(data) {
     const container = $('recoveryMetrics');
     if (!container || !data) return;
-    const rows = normalizeForPeriod(data, currentPeriod);
+    const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) return;
 
     const last = rows[rows.length - 1];
     const prev = rows.length > 1 ? rows[rows.length - 2] : null;
 
-    const rhrCurr = last.restingHr;
-    const rhrPrev = prev ? prev.restingHr : null;
-    const hrvCurr = last.hrv;
-    const hrvPrev = prev ? prev.hrv : null;
+    const rhrCurr = safeNumber(last.restingHr);
+    const rhrPrev = prev ? safeNumber(prev.restingHr) : null;
+    const hrvCurr = safeNumber(last.hrv);
+    const hrvPrev = prev ? safeNumber(prev.hrv) : null;
 
     let status = 'Neutral';
     let badgeClass = 'badge-neutral';
@@ -946,21 +1015,27 @@ function renderRecoveryTab(data) {
         }
     }
 
+    // Coverage
+    const cvg = calcCoverage(last);
+
     container.innerHTML = `
         <div class="kpi-card">
-            <div class="kpi-title">Recovery Trend</div>
+            <div style="display:flex;justify-content:space-between;">
+                <div class="kpi-title">Recovery Trend</div>
+                <div class="text-xs text-secondary">Cov: ${cvg}%</div>
+            </div>
             <div style="margin-top:0.5rem"><span class="badge ${badgeClass}">${status}</span></div>
             <div class="text-sm" style="margin-top:0.5rem">${insight}</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Avg RHR</div>
-            <div class="kpi-value">${rhrCurr ? Math.round(rhrCurr) : '--'} <span class="text-sm">bpm</span></div>
-            <div class="kpi-meta text-xs">vs ${rhrPrev ? Math.round(rhrPrev) : '--'} prev</div>
+            <div class="kpi-value">${fmtKPI(rhrCurr, '', 0)} <span class="text-sm">bpm</span></div>
+            <div class="kpi-meta text-xs">vs ${fmtKPI(rhrPrev, '', 0)} prev</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Avg HRV</div>
-            <div class="kpi-value">${hrvCurr ? Math.round(hrvCurr) : '--'} <span class="text-sm">ms</span></div>
-            <div class="kpi-meta text-xs">vs ${hrvPrev ? Math.round(hrvPrev) : '--'} prev</div>
+            <div class="kpi-value">${fmtKPI(hrvCurr, '', 0)} <span class="text-sm">ms</span></div>
+            <div class="kpi-meta text-xs">vs ${fmtKPI(hrvPrev, '', 0)} prev</div>
         </div>
     `;
 }
@@ -968,24 +1043,25 @@ function renderRecoveryTab(data) {
 function renderActivityTab(data) {
     const container = $('activityMetrics');
     if (!container || !data) return;
-    const rows = normalizeForPeriod(data, currentPeriod);
+    const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) return;
 
     const last = rows[rows.length - 1];
 
-    // Aggregation Logic handled by normalizeForPeriod: steps/cals/etc are SUMs for the period if aggregated,
-    // For Daily, they are daily totals.
-    // We also want "Avg / Day" which is useful for Weekly/Monthly views.
-
     const count = last.days || 1;
+    const steps = safeNumber(last.steps) || 0;
+    const cals = safeNumber(last.caloriesOut) || 0;
+    const azm = safeNumber(last.azm) || 0;
 
-    const steps = last.steps || 0;
-    const cals = last.caloriesOut || 0;
-    const azm = last.azm || 0;
+    // Coverage
+    const cvg = calcCoverage(last);
 
     container.innerHTML = `
         <div class="kpi-card">
-            <div class="kpi-title">Steps</div>
+            <div style="display:flex;justify-content:space-between;">
+                 <div class="kpi-title">Steps</div>
+                 <div class="text-xs text-secondary">Cov: ${cvg}%</div>
+            </div>
             <div class="kpi-value">${(steps / 1000).toFixed(1)}k</div>
             <div class="text-sm">Period Total (${count}d)</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(steps / count).toLocaleString()}/day</div>` : ''}
@@ -1003,12 +1079,6 @@ function renderActivityTab(data) {
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
         </div>
     `;
-}
-
-function calculateAvg(arr, key) {
-    const valid = arr.filter(d => d[key] > 0);
-    if (valid.length === 0) return null;
-    return valid.reduce((sum, d) => sum + Number(d[key]), 0) / valid.length;
 }
 
 function renderExportTab(data) {
