@@ -78,5 +78,5 @@ npx wrangler d1 migrations apply FITBIT_DB --local
    `https://fitbit-health-tracker.<your-subdomain>.workers.dev/fitbit/callback`
 
 ## Notes
-- Tokens are stored in Cloudflare KV (`FITBIT_KV`).
+- Tokens are stored in D1 (`automation_state`).
 - This is a single-user demo (tokens stored under generic key).

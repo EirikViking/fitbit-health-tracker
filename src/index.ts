@@ -1,6 +1,5 @@
 
 export interface Env {
-    FITBIT_KV: KVNamespace;
     FITBIT_DB: D1Database;
     ASSETS: Fetcher;
     FITBIT_CLIENT_ID: string;
@@ -215,7 +214,7 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
                 await syncDay(env, yesterday);
             }
 
-            await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
+            await setState(env, "cron:last_sync", {
                 lastRunAt: new Date().toISOString(),
                 lastSyncDate: today,
                 success: true,
@@ -223,7 +222,7 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
                 synced_dates: [today, yesterday],
                 triggeredAt: meta.triggeredAt,
                 trigger: meta.trigger
-            }));
+            });
 
             // C) Process backfill chunk
             bfStats = await processAutomatedBackfillChunk(env);
@@ -238,7 +237,7 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
             if (e.stack) console.error(`[CRON] Stack: ${String(e.stack)}`);
 
             try {
-                await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
+                await setState(env, "cron:last_sync", {
                     lastRunAt: new Date().toISOString(),
                     lastSyncDate: null,
                     success: false,
@@ -246,9 +245,9 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
                     error: error,
                     triggeredAt: meta.triggeredAt,
                     trigger: meta.trigger
-                }));
-            } catch (kvError: any) {
-                console.error(`[CRON] Failed to log error to KV: ${String(kvError.message)}`);
+                });
+            } catch (stateError: any) {
+                console.error(`[CRON] Failed to log error to D1: ${String(stateError.message)}`);
             }
         }
 
@@ -446,25 +445,50 @@ async function setState<T>(env: Env, key: string, obj: T): Promise<void> {
     await d1SetRaw(env, key, newValueString);
 }
 
-// Safe migration: fallback to KV on first read, then migrate to D1
-async function getStateMigrating<T>(env: Env, key: string): Promise<T | null> {
-    // Try D1 first
-    const d1State = await getState<T>(env, key);
-    if (d1State !== null) return d1State;
+async function deleteState(env: Env, key: string): Promise<void> {
+    await env.FITBIT_DB.prepare("DELETE FROM automation_state WHERE key = ?").bind(key).run();
+}
 
-    // Fallback to KV if not in D1
-    const kvRaw = await env.FITBIT_KV.get(key);
-    if (!kvRaw) return null;
+async function deleteStateByPrefix(env: Env, prefix: string): Promise<void> {
+    await env.FITBIT_DB.prepare("DELETE FROM automation_state WHERE key LIKE ?").bind(`${prefix}%`).run();
+}
 
-    // Migrate from KV to D1
-    try {
-        const kvState = JSON.parse(kvRaw) as T;
-        await setState(env, key, kvState);
-        console.log(`[Migration] Migrated ${key} from KV to D1`);
-        return kvState;
-    } catch {
+interface ExpiringState<T> {
+    value: T;
+    expiresAt: string;
+}
+
+async function getExpiringState<T>(env: Env, key: string): Promise<T | null> {
+    const entry = await getState<ExpiringState<T>>(env, key);
+    if (!entry) return null;
+    if (new Date(entry.expiresAt).getTime() <= Date.now()) {
+        await deleteState(env, key);
         return null;
     }
+    return entry.value;
+}
+
+async function consumeExpiringState<T>(env: Env, key: string): Promise<T | null> {
+    const entry = await getState<ExpiringState<T>>(env, key);
+    if (!entry) return null;
+    if (new Date(entry.expiresAt).getTime() <= Date.now()) {
+        await deleteState(env, key);
+        return null;
+    }
+    await deleteState(env, key);
+    return entry.value;
+}
+
+async function setExpiringState<T>(env: Env, key: string, value: T, ttlMs: number): Promise<void> {
+    await setState(env, key, {
+        value,
+        expiresAt: new Date(Date.now() + ttlMs).toISOString()
+    });
+}
+
+// D1-only state (KV disabled)
+async function getStateMigrating<T>(env: Env, key: string): Promise<T | null> {
+    return getState<T>(env, key);
 }
 
 async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -580,11 +604,8 @@ async function handleBackfillFailedSkip(req: Request, env: Env): Promise<Respons
 }
 
 async function handleCronStatus(req: Request, env: Env): Promise<Response> {
-    const rawCron = await env.FITBIT_KV.get("cron:last_sync");
-    const cron = rawCron ? JSON.parse(rawCron) : null;
-
-    const rawStats = await env.FITBIT_KV.get("cron:stats");
-    const stats = rawStats ? JSON.parse(rawStats) : null;
+    const cron = await getState<any>(env, "cron:last_sync");
+    const stats = await getState<any>(env, "cron:stats");
 
     const backfill = await getStateMigrating<BackfillState>(env, "backfill:progress") || { running: false };
 
@@ -748,8 +769,7 @@ async function handleDevCronTick(req: Request, env: Env): Promise<Response> {
     });
 
     // Fetch updated stats after cron work completes
-    const rawStats = await env.FITBIT_KV.get("cron:stats");
-    const stats = rawStats ? JSON.parse(rawStats) : null;
+    const stats = await getState<any>(env, "cron:stats");
 
     return jsonResponse(env, {
         ok: true,
@@ -778,27 +798,18 @@ async function handleHealth(req: Request, env: Env): Promise<Response> {
         d1Status = `error: ${e.message}`;
     }
 
-    // KV Check
-    let kvStatus = "unknown";
-    try {
-        await env.FITBIT_KV.list({ prefix: "health_check", limit: 1 });
-        kvStatus = "ok";
-    } catch (e: any) {
-        kvStatus = `error: ${e.message}`;
-    }
+    const kvStatus = "disabled";
 
     // Cron & Backfill
-    const cronRaw = await env.FITBIT_KV.get("cron:last_sync");
-    const statsRaw = await env.FITBIT_KV.get("cron:stats");
-    const cron = cronRaw ? JSON.parse(cronRaw) : null;
-    const stats = statsRaw ? JSON.parse(statsRaw) : null;
+    const cron = await getState<any>(env, "cron:last_sync");
+    const stats = await getState<any>(env, "cron:stats");
     const backfill = await getStateMigrating<BackfillState>(env, "backfill:progress");
 
     // Auth
     const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
 
     return jsonResponse(env, {
-        ok: d1Status === "ok" && kvStatus === "ok",
+        ok: d1Status === "ok",
         checks: {
             d1: d1Status,
             kv: kvStatus,
@@ -1476,7 +1487,7 @@ async function syncDay(env: Env, date: string): Promise<number> {
 
 async function handleAuth(req: Request, env: Env): Promise<Response> {
     const state = crypto.randomUUID();
-    await env.FITBIT_KV.put(`oauth_state_${state}`, "valid", { expirationTtl: 600 }); // 10 mins
+    await setExpiringState(env, `oauth_state_${state}`, "valid", 600000); // 10 mins
 
     const params = new URLSearchParams({
         response_type: "code",
@@ -1500,11 +1511,8 @@ async function handleCallback(req: Request, env: Env): Promise<Response> {
     if (!code || !state) return new Response("Missing code or state", { status: 400 });
 
     // Validate state
-    const storedState = await env.FITBIT_KV.get(`oauth_state_${state}`);
+    const storedState = await consumeExpiringState<string>(env, `oauth_state_${state}`);
     if (!storedState) return new Response("Invalid or expired state", { status: 400 });
-
-    // Cleanup state
-    await env.FITBIT_KV.delete(`oauth_state_${state}`);
 
     // Exchange token
     const tokens = await exchangeToken(env, code);
@@ -1874,11 +1882,10 @@ async function handleHistory(req: Request, env: Env): Promise<Response> {
 
     // A) Cache-read
     const cacheKey = `history:${rangeDays}`;
-    const cachedRaw = await env.FITBIT_KV.get(cacheKey);
-    if (cachedRaw) {
-        const data = JSON.parse(cachedRaw);
-        data.cached = true;
-        return jsonResponse(env, data);
+    const cached = await getExpiringState<any>(env, cacheKey);
+    if (cached) {
+        cached.cached = true;
+        return jsonResponse(env, cached);
     }
     const end = new Date();
     const start = new Date();
@@ -1932,7 +1939,7 @@ async function handleHistory(req: Request, env: Env): Promise<Response> {
     };
 
     // B) Cache-write
-    await env.FITBIT_KV.put(cacheKey, JSON.stringify(responseData), { expirationTtl: 600 });
+    await setExpiringState(env, cacheKey, responseData, 600000);
 
     (responseData as any).cached = false;
     return jsonResponse(env, responseData);
@@ -2131,22 +2138,17 @@ async function makeTokenRequest(env: Env, body: URLSearchParams): Promise<TokenB
 const TOKEN_KEY = "user_tokens_v1";
 
 async function storeTokens(env: Env, tokens: TokenBundle) {
-    await env.FITBIT_KV.put(TOKEN_KEY, JSON.stringify(tokens));
+    await setState(env, TOKEN_KEY, tokens);
     await setState(env, "auth:required", { required: false, lastError: null });
 }
 
 async function getTokens(env: Env): Promise<TokenBundle | null> {
-    const raw = await env.FITBIT_KV.get(TOKEN_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as TokenBundle;
+    return getState<TokenBundle>(env, TOKEN_KEY);
 }
 
 // C) Cache-bust helper
 async function invalidateHistoryCache(env: Env) {
-    const list = await env.FITBIT_KV.list({ prefix: "history:" });
-    for (const key of list.keys) {
-        await env.FITBIT_KV.delete(key.name);
-    }
+    await deleteStateByPrefix(env, "history:");
 }
 
 // --- Data Quality Guards ---
@@ -2217,8 +2219,8 @@ function sanitizeDailyMetrics(date: string, raw: any): any {
 // --- Cron Stats Helper ---
 
 async function updateCronStats(env: Env, success: boolean, duration: number, details?: { newDays: number, retriedDays: number, blockedByAuth: boolean }) {
-    const rawCheck = await env.FITBIT_KV.get("cron:stats");
-    let stats = rawCheck ? JSON.parse(rawCheck) : {
+    const existing = await getState<any>(env, "cron:stats");
+    let stats = existing || {
         runs: 0,
         successes: 0,
         failures: 0,
@@ -2257,7 +2259,7 @@ async function updateCronStats(env: Env, success: boolean, duration: number, det
         stats.nextRetryAt = null;
     }
 
-    await env.FITBIT_KV.put("cron:stats", JSON.stringify(stats));
+    await setState(env, "cron:stats", stats);
 }
 
 // --- Automated Backfill Helper ---
