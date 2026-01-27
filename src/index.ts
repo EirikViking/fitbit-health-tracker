@@ -2104,49 +2104,67 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
         progress.lastError = null;
     }
 
+    // Determine Chunk Range
+    // If no progress was made in previous tick (rate_limit or blockers), reuse existing chunk window
+    // This prevents chunk from shifting when retrying rate-limited ranges
+    const shouldReuseChunk = progress
+        && progress.from
+        && progress.to
+        && progress.processedDays === 0
+        && (cronState.lastTickResult === 'rate_limit' || progress.lastError?.includes('50+'));
+
+    let fromDate: Date;
     let toDate: Date;
-    if (progress && progress.lastProcessedDate && progress.lastProcessedDate !== "DONE") {
-        // Continue from last processed
-        const d = new Date(progress.lastProcessedDate);
-        d.setDate(d.getDate() - 1);
-        toDate = d;
-    } else if (progress && progress.lastProcessedDate === "DONE") {
-        // Was marked done previously? If plan is active maybe we wanted to restart?
-        // Assume restart from yesterday if we just started plan or ensure logic holds
-        // If plan is active, we should keep going if we haven't hit target
-        // But if progress says DONE, we need safety.
-        // Let's assume start from Yesterday if progress is DONE or missing
-        toDate = new Date(Date.now() - 86400000);
+    let diffDays: number;
+
+    if (shouldReuseChunk) {
+        // Reuse existing chunk window to retry exact same range
+        fromDate = new Date(progress.from);
+        toDate = new Date(progress.to);
+        diffDays = progress.totalDays;
+        console.log(`[Backfill] Reusing chunk window (no progress last tick): ${progress.from} to ${progress.to}`);
     } else {
-        // No progress, start from yesterday
-        toDate = new Date(Date.now() - 86400000);
-    }
-
-    const targetDate = new Date(plan.targetSince);
-    if (toDate < targetDate) {
-        // We reached the target!
-        plan.active = false;
-        plan.updatedAt = new Date().toISOString();
-        await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
-
-        if (progress) {
-            // Mark progress DONE
-            await updateState(env, new Date(plan.targetSince), new Date(), progress.processedDays, progress.totalDays, progress.startedAt, "DONE", null, false, 0, progress.failedDays || []);
+        // Calculate new chunk window based on progress
+        if (progress && progress.lastProcessedDate && progress.lastProcessedDate !== "DONE") {
+            // Continue from last processed
+            const d = new Date(progress.lastProcessedDate);
+            d.setDate(d.getDate() - 1);
+            toDate = d;
+        } else if (progress && progress.lastProcessedDate === "DONE") {
+            // Was marked done previously? If plan is active maybe we wanted to restart?
+            // Assume restart from yesterday if we just started plan or ensure logic holds
+            toDate = new Date(Date.now() - 86400000);
+        } else {
+            // No progress, start from yesterday
+            toDate = new Date(Date.now() - 86400000);
         }
-        console.log("Backfill Plan Completed!");
-        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+
+        const targetDate = new Date(plan.targetSince);
+        if (toDate < targetDate) {
+            // We reached the target!
+            plan.active = false;
+            plan.updatedAt = new Date().toISOString();
+            await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+
+            if (progress) {
+                // Mark progress DONE
+                await updateState(env, new Date(plan.targetSince), new Date(), progress.processedDays, progress.totalDays, progress.startedAt, "DONE", null, false, 0, progress.failedDays || []);
+            }
+            console.log("Backfill Plan Completed!");
+            return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+        }
+
+        // Determine Chunk Size
+        fromDate = new Date(toDate);
+        fromDate.setDate(fromDate.getDate() - (plan.chunkDays - 1));
+
+        // Clamp to target
+        if (fromDate < targetDate) {
+            fromDate.setTime(targetDate.getTime());
+        }
+
+        diffDays = Math.ceil((toDate.getTime() - fromDate.getTime()) / 86400000) + 1;
     }
-
-    // Determine Chunk Size
-    const fromDate = new Date(toDate);
-    fromDate.setDate(fromDate.getDate() - (plan.chunkDays - 1));
-
-    // Clamp to target
-    if (fromDate < targetDate) {
-        fromDate.setTime(targetDate.getTime());
-    }
-
-    const diffDays = Math.ceil((toDate.getTime() - fromDate.getTime()) / 86400000) + 1;
 
     console.log(`Running Backfill Chunk: ${fromDate.toISOString().split('T')[0]} to ${toDate.toISOString().split('T')[0]} (${diffDays} days)`);
 
