@@ -7,8 +7,67 @@ let viewMode = 'calendar';
 let repairState = null;
 const $ = (id) => document.getElementById(id);
 
+// Theme Management
+function initTheme() {
+    const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    updateThemeIcon(savedTheme);
+}
+
+function toggleTheme() {
+    const currentTheme = document.documentElement.getAttribute('data-theme');
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', newTheme);
+    localStorage.setItem('fitbit_theme', newTheme);
+    updateThemeIcon(newTheme);
+}
+
+function updateThemeIcon(theme) {
+    const icon = document.querySelector('#themeToggle .theme-icon');
+    if (icon) {
+        icon.textContent = theme === 'dark' ? '☀️' : '🌙';
+    }
+}
+
+// Personalized Greeting
+function updateGreeting() {
+    const hour = new Date().getHours();
+    const greetingEl = $('heroGreeting');
+
+    let greeting = '';
+    let emoji = '';
+
+    if (hour < 5) {
+        greeting = "Burning the midnight oil";
+        emoji = "🌙";
+    } else if (hour < 12) {
+        greeting = "Good morning, Eirik";
+        emoji = "🌅";
+    } else if (hour < 17) {
+        greeting = "Good afternoon, Eirik";
+        emoji = "☀️";
+    } else if (hour < 21) {
+        greeting = "Good evening, Eirik";
+        emoji = "🌆";
+    } else {
+        greeting = "Good night, Eirik";
+        emoji = "🌃";
+    }
+
+    if (greetingEl) {
+        greetingEl.textContent = `${greeting} ${emoji}`;
+    }
+}
+
 // Init
 document.addEventListener('DOMContentLoaded', () => {
+    // Theme Toggle
+    initTheme();
+    $('themeToggle').addEventListener('click', toggleTheme);
+
+    // Personalized Greeting
+    updateGreeting();
+
     $('syncBtn').addEventListener('click', handleSync);
     $('closeModal').addEventListener('click', () => $('dayModal').classList.remove('open'));
 
@@ -86,7 +145,13 @@ window.switchTab = function (tabName) {
     const target = document.getElementById(`tab-${tabName}`);
     if (target) target.classList.add('active');
 
+    // Update desktop nav
     document.querySelectorAll('.nav-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
+
+    // Update mobile nav
+    document.querySelectorAll('.mobile-nav-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tab === tabName);
     });
 

@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fitbit Health Dashboard</title>
+  <title>Eirik's Fitbot - Health Dashboard</title>
   <link rel="stylesheet" href="/app.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -12,188 +12,243 @@
 
 <body>
 
+  <!-- Theme Toggle -->
+  <button id="themeToggle" class="theme-toggle" aria-label="Toggle theme">
+    <span class="theme-icon">🌙</span>
+  </button>
+
   <div class="container">
-    <header>
-      <h1>Fitbit Health</h1>
-      <div>
+    <!-- Hero Header -->
+    <header class="hero-header">
+      <h1 class="hero-title">Eirik's Fitbot</h1>
+      <p id="heroGreeting" class="hero-greeting">Good day!</p>
+      <div style="margin-top: 1.5rem;">
         <span id="syncStatus" class="sync-status"></span>
         <button id="syncBtn" class="btn">
-          <span class="icon">🔄</span> Sync Now
+          <span>🔄</span> Sync Now
         </button>
       </div>
     </header>
 
+    <!-- Period Toggle -->
     <div id="periodToggle" class="period-toggle">
       <button class="btn-secondary active" data-period="daily" onclick="setPeriod('daily')">Daily</button>
       <button class="btn-secondary" data-period="weekly" onclick="setPeriod('weekly')">Weekly</button>
       <button class="btn-secondary" data-period="monthly" onclick="setPeriod('monthly')">Monthly</button>
     </div>
 
+    <!-- Connect Prompt -->
     <div id="connectSection" class="connect-prompt hidden">
-      <h2>Welcome Back</h2>
-      <p style="color: var(--text-secondary); margin: 1rem 0 2rem;">Connect your Fitbit account to visualize your health
-        trends.</p>
-      <a href="/fitbit/auth" class="btn">Connect Fitbit Account</a>
+      <div class="empty-state">
+        <div class="empty-state-icon">🔗</div>
+        <h2 class="empty-state-title">Connect Your Fitbit</h2>
+        <p class="empty-state-text">Link your Fitbit account to start tracking your health metrics and visualize
+          your wellness journey.</p>
+        <a href="/fitbit/auth" class="btn" style="margin-top: 2rem;">Connect Fitbit Account</a>
+      </div>
     </div>
 
+    <!-- Dashboard Section -->
     <div id="dashboardSection" class="hidden">
       <!-- Navigation -->
       <nav>
-        <button class="nav-btn active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
-        <button class="nav-btn" data-tab="sleep" onclick="switchTab('sleep')">Sleep</button>
-        <button class="nav-btn" data-tab="recovery" onclick="switchTab('recovery')">Recovery</button>
-        <button class="nav-btn" data-tab="activity" onclick="switchTab('activity')">Activity</button>
-        <button class="nav-btn" data-tab="backfill" onclick="switchTab('backfill')">Backfill</button>
-        <button class="nav-btn" data-tab="exports" onclick="switchTab('exports')">Exports</button>
+        <button class="nav-btn active" data-tab="overview" onclick="switchTab('overview')">
+          <span class="nav-icon">📊</span> Overview
+        </button>
+        <button class="nav-btn" data-tab="sleep" onclick="switchTab('sleep')">
+          <span class="nav-icon">😴</span> Sleep
+        </button>
+        <button class="nav-btn" data-tab="recovery" onclick="switchTab('recovery')">
+          <span class="nav-icon">💪</span> Recovery
+        </button>
+        <button class="nav-btn" data-tab="activity" onclick="switchTab('activity')">
+          <span class="nav-icon">🏃</span> Activity
+        </button>
+        <button class="nav-btn" data-tab="backfill" onclick="switchTab('backfill')">
+          <span class="nav-icon">⏳</span> Backfill
+        </button>
+        <button class="nav-btn" data-tab="exports" onclick="switchTab('exports')">
+          <span class="nav-icon">📥</span> Exports
+        </button>
       </nav>
 
       <!-- Overview Tab -->
       <div id="tab-overview" class="tab-pane active">
+        <!-- Loading Skeleton -->
+        <div id="loadingSkeleton" class="hidden">
+          <div class="kpi-grid">
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+            <div class="skeleton skeleton-card"></div>
+          </div>
+        </div>
+
+        <!-- KPI Cards -->
         <div id="overviewKPIs" class="kpi-grid">
           <!-- Injected via JS -->
         </div>
-
-      </div>
-    </div> <!-- end overview tab -->
-  </div> <!-- end overview tab -->
-
-  <!-- Quick Stats Tests -->
-  <!-- <div class="card" style="margin-top: 2rem;">
-        <h3>Today (Quick View)</h3>
-        <div id="todaySummary" class="metric-grid"></div>
-      </div> -->
-
-  <!-- Placeholders -->
-  <div id="tab-sleep" class="tab-pane">
-    <div id="sleepMetrics" class="kpi-grid"></div>
-    <div class="card">
-      <div class="card-title">Sleep Duration <span style="font-size:0.8rem">hrs</span></div>
-      <canvas id="chartSleep"></canvas>
-    </div>
-  </div>
-  <div id="tab-recovery" class="tab-pane">
-    <div id="recoveryMetrics" class="kpi-grid"></div>
-    <div class="dashboard-grid">
-      <div class="card">
-        <div class="card-title">Resting Heart Rate <span style="font-size:0.8rem">30 Days</span></div>
-        <canvas id="chartHR"></canvas>
-      </div>
-      <div class="card">
-        <div class="card-title">HRV (RMSSD) <span style="font-size:0.8rem">ms</span></div>
-        <canvas id="chartHRV"></canvas>
-      </div>
-    </div>
-  </div>
-  <div id="tab-activity" class="tab-pane">
-    <div id="activityMetrics" class="kpi-grid"></div>
-    <!-- Potential charts for Activity can go here later -->
-  </div>
-
-  <!-- Backfill Tab -->
-  <div id="tab-backfill" class="tab-pane">
-    <!-- Backfill Progress Card -->
-    <div id="backfillCard" class="card hidden">
-      <div class="card-title">
-        <span>Backfill Progress</span>
-        <span id="bf-status-text" class="status-badge">Idle</span>
       </div>
 
-      <div class="backfill-stats">
-        <div class="bf-row">
-          <span class="bf-label">Target Since</span>
-          <span id="bf-target-since" class="bf-value">--</span>
-        </div>
-        <div class="bf-row">
-          <span class="bf-label">Processed Range</span>
-          <span class="bf-value"><span id="bf-from">--</span> to <span id="bf-to">--</span></span>
-        </div>
-        <div class="bf-row">
-          <span class="bf-label">Last Date</span>
-          <span id="bf-last-date" class="bf-value">--</span>
-        </div>
-        <div class="bf-row">
-          <span class="bf-label">Progress</span>
-          <span class="bf-value"><span id="bf-processed">0</span> / <span id="bf-total">0</span> days</span>
-        </div>
-        <div class="bf-row">
-          <span class="bf-label">Est. Remaining</span>
-          <span id="bf-remaining" class="bf-value">--</span>
+      <!-- Sleep Tab -->
+      <div id="tab-sleep" class="tab-pane">
+        <div id="sleepMetrics" class="kpi-grid"></div>
+        <div class="card">
+          <div class="card-title">Sleep Duration <span style="font-size:0.8rem">hrs</span></div>
+          <canvas id="chartSleep"></canvas>
         </div>
       </div>
 
-      <div class="progress-bar-bg">
-        <div id="bf-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
-      </div>
-
-      <div id="bf-error-section" class="bf-error hidden">
-        <div class="bf-row">
-          <span class="bf-label" style="color:var(--error-color)">Error</span>
-          <span id="bf-error-type" class="bf-value">--</span>
-        </div>
-        <div class="bf-row">
-          <span class="bf-label">Message</span>
-          <span id="bf-error-msg" class="bf-value">--</span>
-        </div>
-        <div id="bf-next-retry-row" class="bf-row hidden">
-          <span class="bf-label">Retry At</span>
-          <span id="bf-next-retry" class="bf-value">--</span>
-        </div>
-        <div class="bf-row">
-          <span class="bf-label">Failed Date</span>
-          <span id="bf-error-date" class="bf-value">--</span>
+      <!-- Recovery Tab -->
+      <div id="tab-recovery" class="tab-pane">
+        <div id="recoveryMetrics" class="kpi-grid"></div>
+        <div class="dashboard-grid">
+          <div class="card">
+            <div class="card-title">Resting Heart Rate <span style="font-size:0.8rem">30 Days</span></div>
+            <canvas id="chartHR"></canvas>
+          </div>
+          <div class="card">
+            <div class="card-title">HRV (RMSSD) <span style="font-size:0.8rem">ms</span></div>
+            <canvas id="chartHRV"></canvas>
+          </div>
         </div>
       </div>
 
-      <div class="bf-footer">
-        <span id="bf-updated-at">Updated: --</span>
+      <!-- Activity Tab -->
+      <div id="tab-activity" class="tab-pane">
+        <div id="activityMetrics" class="kpi-grid"></div>
       </div>
-    </div>
 
-  </div> <!-- end backfill card -->
+      <!-- Backfill Tab -->
+      <div id="tab-backfill" class="tab-pane">
+        <div id="backfillCard" class="card hidden">
+          <div class="card-title">
+            <span>Backfill Progress</span>
+            <span id="bf-status-text" class="badge badge-neutral">Idle</span>
+          </div>
 
-  <!-- Raw JSON Debug -->
-  <div class="card" style="margin-top:2rem;">
-    <div class="card-title" onclick="document.getElementById('rawBackfill').classList.toggle('hidden')"
-      style="cursor:pointer">
-      <span>Raw Debug Data (Click to toggle)</span>
-      <span>▼</span>
-    </div>
-    <pre id="rawBackfill" class="hidden"
-      style="font-size:0.75rem; background:#f5f5f5; padding:1rem; overflow:auto; max-height:300px; color:#333;"></pre>
-  </div>
-  </div> <!-- end backfill tab -->
+          <div class="backfill-stats">
+            <div class="bf-row" style="margin-bottom: 0.75rem;">
+              <span class="text-xs">Target Since</span>
+              <span id="bf-target-since" class="text-sm" style="font-weight: 600;">--</span>
+            </div>
+            <div class="bf-row" style="margin-bottom: 0.75rem;">
+              <span class="text-xs">Processed Range</span>
+              <span class="text-sm" style="font-weight: 600;"><span id="bf-from">--</span> to <span
+                  id="bf-to">--</span></span>
+            </div>
+            <div class="bf-row" style="margin-bottom: 0.75rem;">
+              <span class="text-xs">Last Date</span>
+              <span id="bf-last-date" class="text-sm" style="font-weight: 600;">--</span>
+            </div>
+            <div class="bf-row" style="margin-bottom: 0.75rem;">
+              <span class="text-xs">Progress</span>
+              <span class="text-sm" style="font-weight: 600;"><span id="bf-processed">0</span> / <span
+                  id="bf-total">0</span> days</span>
+            </div>
+            <div class="bf-row" style="margin-bottom: 0.75rem;">
+              <span class="text-xs">Est. Remaining</span>
+              <span id="bf-remaining" class="text-sm" style="font-weight: 600;">--</span>
+            </div>
+          </div>
 
-  <!-- Exports Tab -->
-  <div id="tab-exports" class="tab-pane">
-    <div class="card">
-      <div class="card-title">Data Exports</div>
-      <p style="color:var(--text-secondary); margin-bottom:1.5rem;">Download your synchronized Fitbit data in CSV
-        format for external analysis.</p>
-      <div style="display:flex; gap:1rem; flex-wrap:wrap;">
-        <a href="/api/export/daily" class="btn-secondary" download>Daily Metrics (CSV)</a>
-        <a href="/api/export/weekly" class="btn-secondary" download>Weekly Aggregates (CSV)</a>
-        <a href="/api/export/monthly" class="btn-secondary" download>Monthly Aggregates (CSV)</a>
+          <div style="background: var(--glass-bg); height: 8px; border-radius: 999px; overflow: hidden; margin: 1.5rem 0;">
+            <div id="bf-progress-bar" style="height: 100%; background: var(--primary); transition: width 0.5s; width: 0%"></div>
+          </div>
+
+          <div id="bf-error-section" class="hidden" style="margin-top: 1.5rem; padding: 1rem; background: var(--error-bg); border-radius: var(--radius-md); border: 1px solid var(--error);">
+            <div style="margin-bottom: 0.5rem;">
+              <span class="text-xs" style="color: var(--error);">Error Type</span>
+              <span id="bf-error-type" class="text-sm" style="display: block; margin-top: 0.25rem; font-weight: 600;">--</span>
+            </div>
+            <div style="margin-bottom: 0.5rem;">
+              <span class="text-xs">Message</span>
+              <span id="bf-error-msg" class="text-sm" style="display: block; margin-top: 0.25rem;">--</span>
+            </div>
+            <div id="bf-next-retry-row" class="hidden" style="margin-bottom: 0.5rem;">
+              <span class="text-xs">Retry At</span>
+              <span id="bf-next-retry" class="text-sm" style="display: block; margin-top: 0.25rem;">--</span>
+            </div>
+            <div>
+              <span class="text-xs">Failed Date</span>
+              <span id="bf-error-date" class="text-sm" style="display: block; margin-top: 0.25rem;">--</span>
+            </div>
+          </div>
+
+          <div style="margin-top: 1.5rem; text-align: center;">
+            <span id="bf-updated-at" class="text-xs">Updated: --</span>
+          </div>
+        </div>
+
+        <!-- Raw JSON Debug -->
+        <div class="card" style="margin-top: 2rem;">
+          <div class="card-title" onclick="document.getElementById('rawBackfill').classList.toggle('hidden')"
+            style="cursor: pointer;">
+            <span>Raw Debug Data</span>
+            <span>▼</span>
+          </div>
+          <pre id="rawBackfill" class="hidden"
+            style="font-size: 0.75rem; background: var(--glass-bg); padding: 1rem; overflow: auto; max-height: 300px; border-radius: var(--radius-md);"></pre>
+        </div>
       </div>
+
+      <!-- Exports Tab -->
+      <div id="tab-exports" class="tab-pane">
+        <div class="card">
+          <div class="card-title">Data Exports</div>
+          <p class="text-sm" style="margin-bottom: 1.5rem;">Download your synchronized Fitbit data in CSV
+            format for external analysis.</p>
+          <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+            <a href="/api/export/daily" class="btn-secondary" download>📊 Daily Metrics</a>
+            <a href="/api/export/weekly" class="btn-secondary" download>📈 Weekly Aggregates</a>
+            <a href="/api/export/monthly" class="btn-secondary" download>📉 Monthly Aggregates</a>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
-  </div>
+  <!-- Mobile Bottom Navigation -->
+  <div class="mobile-nav">
+    <div class="mobile-nav-items">
+      <button class="mobile-nav-btn active" data-tab="overview" onclick="switchTab('overview')">
+        <span class="nav-icon">📊</span>
+        <span>Overview</span>
+      </button>
+      <button class="mobile-nav-btn" data-tab="sleep" onclick="switchTab('sleep')">
+        <span class="nav-icon">😴</span>
+        <span>Sleep</span>
+      </button>
+      <button class="mobile-nav-btn" data-tab="recovery" onclick="switchTab('recovery')">
+        <span class="nav-icon">💪</span>
+        <span>Recovery</span>
+      </button>
+      <button class="mobile-nav-btn" data-tab="activity" onclick="switchTab('activity')">
+        <span class="nav-icon">🏃</span>
+        <span>Activity</span>
+      </button>
+      <button class="mobile-nav-btn" data-tab="backfill" onclick="switchTab('backfill')">
+        <span class="nav-icon">⏳</span>
+        <span>Backfill</span>
+      </button>
+      <button class="mobile-nav-btn" data-tab="exports" onclick="switchTab('exports')">
+        <span class="nav-icon">📥</span>
+        <span>Export</span>
+      </button>
+    </div>
   </div>
 
   <!-- Day Details Modal -->
   <div id="dayModal" class="modal-overlay">
     <div class="modal-content">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
         <h2 id="modalDate"></h2>
-        <button id="closeModal" class="btn-secondary" style="padding:0.4rem 0.8rem;">✕</button>
+        <button id="closeModal" class="btn-secondary" style="padding: 0.4rem 0.8rem;">✕</button>
       </div>
 
       <div id="modalMetrics" class="metric-grid">
         <!-- Injected via JS -->
-      </div>
-
-      <div id="modalRaw"
-        style="font-family: monospace; font-size: 0.8rem; background: #eee; padding: 1rem; border-radius: 8px; overflow-x: auto; display: none;">
       </div>
     </div>
   </div>
