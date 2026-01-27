@@ -8,6 +8,7 @@ let repairState = null;
 let currentRange = localStorage.getItem('fitbit_range') || 'all'; // 7d, 30d, 90d, ytd, all
 let rangeStartDate = null;
 let rangeEndDate = null;
+let compareMode = localStorage.getItem('fitbit_compare') === 'true'; // Compare current vs previous period
 const $ = (id) => document.getElementById(id);
 
 // Tooltip Database
@@ -175,6 +176,35 @@ function getFilteredDashboardData() {
     return filterDataByRange(dashboardData, rangeStartDate, rangeEndDate);
 }
 
+// Compare Mode Functions
+function toggleCompareMode() {
+    compareMode = !compareMode;
+    localStorage.setItem('fitbit_compare', compareMode);
+
+    // Update toggle UI
+    const toggleSwitch = document.getElementById('compareToggle');
+    if (toggleSwitch) {
+        toggleSwitch.classList.toggle('active', compareMode);
+    }
+
+    // Re-render with compare mode
+    if (dashboardData) {
+        renderAll();
+    }
+}
+
+function getComparisonData(data, period) {
+    if (!data || !Array.isArray(data.series)) return null;
+
+    const rows = normalizeForPeriod(data, period);
+    if (rows.length < 2) return null; // Need at least 2 periods to compare
+
+    const current = rows[rows.length - 1];
+    const previous = rows[rows.length - 2];
+
+    return { current, previous };
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -267,6 +297,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Initialize range
         setRange(currentRange, false);
+    }
+
+    // Inject Compare Mode Toggle
+    if (periodToggle) {
+        const compareToggle = document.createElement('div');
+        compareToggle.className = 'compare-toggle-container';
+        compareToggle.innerHTML = `
+            <span class="compare-toggle-label">Compare Mode:</span>
+            <div id="compareToggle" class="toggle-switch ${compareMode ? 'active' : ''}" title="Toggle comparison view"></div>
+            <span class="text-xs text-secondary">Compare current vs previous period</span>
+        `;
+
+        // Insert after range picker
+        const rangePicker = document.querySelector('.range-picker');
+        if (rangePicker) {
+            rangePicker.insertAdjacentElement('afterend', compareToggle);
+        }
+
+        // Bind toggle click
+        const toggle = document.getElementById('compareToggle');
+        if (toggle) {
+            toggle.addEventListener('click', toggleCompareMode);
+        }
     }
 
     // Inject View Mode Toggle
@@ -1224,6 +1277,46 @@ function renderKPIs(data) {
         const val = safeNumber(last[key]);
         const prevVal = prev ? safeNumber(prev[key]) : null;
 
+        // Format values
+        const formatValue = (v) => {
+            if (v === null) return '—';
+            if (key === 'sleepMinutes') return (v / 60).toFixed(1);
+            return v.toLocaleString(undefined, { maximumFractionDigits: 1 });
+        };
+
+        // Compare mode: side-by-side display
+        if (compareMode && prevVal !== null && val !== null) {
+            const diff = val - prevVal;
+            const pctChange = ((diff / prevVal) * 100).toFixed(1);
+            const changeClass = diff > 0 ? (higherIsBetter ? 'positive' : 'negative') :
+                                diff < 0 ? (higherIsBetter ? 'negative' : 'positive') : 'neutral';
+            const changeSymbol = diff > 0 ? '↑' : diff < 0 ? '↓' : '→';
+
+            const tooltip = tooltipKey ? createTooltip(tooltipKey) : '';
+            const drilldownAttr = drilldownTarget ? `data-drilldown="${drilldownTarget}"` : '';
+            const drilldownHint = drilldownTarget ? '<div class="drilldown-hint">Click to view details →</div>' : '';
+
+            return `
+            <div class="kpi-card compare-mode" ${drilldownAttr}>
+                <div class="kpi-title">${title}</div>
+                <div class="compare-data">
+                    <div class="compare-column">
+                        <div class="compare-column-header">Previous</div>
+                        <div class="compare-value">${formatValue(prevVal)} <span style="font-size:0.7rem">${unit}</span></div>
+                    </div>
+                    <div class="compare-column">
+                        <div class="compare-column-header">Current</div>
+                        <div class="compare-value">${formatValue(val)} <span style="font-size:0.7rem">${unit}</span></div>
+                        <div class="compare-change ${changeClass}">${changeSymbol} ${Math.abs(pctChange)}%</div>
+                    </div>
+                </div>
+                ${drilldownHint}
+                ${tooltip}
+            </div>
+            `;
+        }
+
+        // Normal mode: single value with trend
         let trendHtml = '<span style="color:#ccc; font-size:0.8rem">Not enough data</span>';
 
         if (val !== null && prevVal !== null) {
@@ -1240,11 +1333,7 @@ function renderKPIs(data) {
             trendHtml = `<span class="${colorClass}">${symbol} ${diffFmt} vs prev</span>`;
         }
 
-        let displayVal = '—';
-        if (val !== null) {
-            if (key === 'sleepMinutes') displayVal = (val / 60).toFixed(1);
-            else displayVal = val.toLocaleString(undefined, { maximumFractionDigits: 1 });
-        }
+        let displayVal = formatValue(val);
 
         // Add tooltip if key provided
         const tooltip = tooltipKey ? createTooltip(tooltipKey) : '';
