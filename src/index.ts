@@ -306,12 +306,9 @@ async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Pr
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
     // Check if running
-    const rawState = await env.FITBIT_KV.get("backfill:progress");
-    if (rawState) {
-        const state = JSON.parse(rawState) as BackfillState;
-        if (state.running) {
-            return jsonResponse(env, { error: "Backfill already running", state }, 409);
-        }
+    const existingState = await getStateMigrating<BackfillState>(env, "backfill:progress");
+    if (existingState && existingState.running) {
+        return jsonResponse(env, { error: "Backfill already running", state: existingState }, 409);
     }
 
     let body: any = {};
@@ -348,8 +345,8 @@ async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Pr
     };
 
     // Clear any previous stop signal
-    await env.FITBIT_KV.delete("backfill:stop");
-    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(initialState));
+    await setState(env, "backfill:stop", { value: false });
+    await setState(env, "backfill:progress", initialState);
 
     // Trigger background process
     ctx.waitUntil(processBackfill(env, fromDate, toDate, diffDays));
@@ -367,11 +364,9 @@ async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Pr
 }
 
 async function handleBackfillStatus(req: Request, env: Env): Promise<Response> {
-    const rawState = await env.FITBIT_KV.get("backfill:progress");
-    const state = rawState ? JSON.parse(rawState) : { running: false };
+    const state = await getStateMigrating<BackfillState>(env, "backfill:progress") || { running: false };
 
-    const rawCronState = await env.FITBIT_KV.get("backfill:cron_state");
-    const cronState = rawCronState ? JSON.parse(rawCronState) : null;
+    const cronState = await getStateMigrating<BackfillCronState>(env, "backfill:cron_state");
 
     // Calculate earliest nextRetryAt from failedDays for visibility
     let earliestRetryAt = null;
@@ -390,8 +385,12 @@ async function handleBackfillStatus(req: Request, env: Env): Promise<Response> {
 
 async function handleBackfillStop(req: Request, env: Env): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
-    await env.FITBIT_KV.put("backfill:stop", "true");
-    await env.FITBIT_KV.delete("backfill:plan"); // Stop plan too if manual stop
+    await setState(env, "backfill:stop", { value: true });
+    const plan = await getStateMigrating<BackfillPlan>(env, "backfill:plan");
+    if (plan) {
+        plan.active = false;
+        await setState(env, "backfill:plan", plan);
+    }
     return jsonResponse(env, { message: "Backfill stop signal sent" });
 }
 
@@ -402,6 +401,63 @@ interface BackfillPlan {
     maxWallMs: number;
     createdAt: string;
     updatedAt: string;
+}
+
+// --- D1 State Helpers ---
+
+async function d1GetRaw(env: Env, key: string): Promise<{ key: string, value: string, updated_at: string } | null> {
+    const result = await env.FITBIT_DB.prepare("SELECT key, value, updated_at FROM automation_state WHERE key = ?").bind(key).first();
+    return result as any;
+}
+
+async function d1SetRaw(env: Env, key: string, valueString: string): Promise<void> {
+    const now = new Date().toISOString();
+    await env.FITBIT_DB.prepare("INSERT INTO automation_state (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+        .bind(key, valueString, now)
+        .run();
+}
+
+async function getState<T>(env: Env, key: string): Promise<T | null> {
+    const row = await d1GetRaw(env, key);
+    if (!row) return null;
+    try {
+        return JSON.parse(row.value) as T;
+    } catch {
+        return null;
+    }
+}
+
+async function setState<T>(env: Env, key: string, obj: T): Promise<void> {
+    const newValueString = JSON.stringify(obj);
+    const existing = await d1GetRaw(env, key);
+
+    // Only write if value changed
+    if (existing && existing.value === newValueString) {
+        return;
+    }
+
+    await d1SetRaw(env, key, newValueString);
+}
+
+// Safe migration: fallback to KV on first read, then migrate to D1
+async function getStateMigrating<T>(env: Env, key: string): Promise<T | null> {
+    // Try D1 first
+    const d1State = await getState<T>(env, key);
+    if (d1State !== null) return d1State;
+
+    // Fallback to KV if not in D1
+    const kvRaw = await env.FITBIT_KV.get(key);
+    if (!kvRaw) return null;
+
+    // Migrate from KV to D1
+    try {
+        const kvState = JSON.parse(kvRaw) as T;
+        await setState(env, key, kvState);
+        console.log(`[Migration] Migrated ${key} from KV to D1`);
+        return kvState;
+    } catch {
+        return null;
+    }
 }
 
 async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -422,8 +478,8 @@ async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionCon
         updatedAt: new Date().toISOString()
     };
 
-    await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
-    await env.FITBIT_KV.delete("backfill:stop");
+    await setState(env, "backfill:plan", plan);
+    await setState(env, "backfill:stop", { value: false });
 
     // Trigger first chunk immediately
     ctx.waitUntil(processAutomatedBackfillChunk(env));
@@ -434,23 +490,20 @@ async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionCon
 async function handleBackfillPlanStop(req: Request, env: Env): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
-    if (rawPlan) {
-        const plan = JSON.parse(rawPlan) as BackfillPlan;
+    const plan = await getStateMigrating<BackfillPlan>(env, "backfill:plan");
+    if (plan) {
         plan.active = false;
-        await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+        await setState(env, "backfill:plan", plan);
     }
 
-    await env.FITBIT_KV.put("backfill:stop", "true");
+    await setState(env, "backfill:stop", { value: true });
     return jsonResponse(env, { message: "Backfill plan stopped" });
 }
 
 async function handleBackfillPlanStatus(req: Request, env: Env): Promise<Response> {
-    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
-    const plan = rawPlan ? JSON.parse(rawPlan) : null;
+    const plan = await getStateMigrating<BackfillPlan>(env, "backfill:plan");
 
-    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
-    const progress = rawProgress ? JSON.parse(rawProgress) : null;
+    const progress = await getStateMigrating<BackfillState>(env, "backfill:progress");
 
     let estimatedRemainingDays = 0;
     if (plan && plan.active && plan.targetSince && progress?.lastProcessedDate && progress.lastProcessedDate !== "DONE") {
@@ -472,16 +525,14 @@ async function handleBackfillPlanStatus(req: Request, env: Env): Promise<Respons
 async function handleBackfillPlanTick(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
-    if (!rawPlan) return jsonResponse(env, { ok: false, message: "No plan found" }, 409);
+    const plan = await getStateMigrating<BackfillPlan>(env, "backfill:plan");
+    if (!plan) return jsonResponse(env, { ok: false, message: "No plan found" }, 409);
 
-    const plan = JSON.parse(rawPlan) as BackfillPlan;
     if (!plan.active) return jsonResponse(env, { ok: false, message: "Plan not active" }, 409);
 
-    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
-    if (rawProgress) {
-        const p = JSON.parse(rawProgress);
-        if (p.running) return jsonResponse(env, { ok: true, message: "already running" }, 202);
+    const progress = await getStateMigrating<BackfillState>(env, "backfill:progress");
+    if (progress && progress.running) {
+        return jsonResponse(env, { ok: true, message: "already running" }, 202);
     }
 
     // Wrap in async to run in background, but we don't wait for return in response
@@ -501,10 +552,9 @@ async function handleBackfillFailedSkip(req: Request, env: Env): Promise<Respons
     const { date } = body;
     if (!date) return new Response("Missing date", { status: 400 });
 
-    const rawState = await env.FITBIT_KV.get("backfill:progress");
-    if (!rawState) return jsonResponse(env, { error: "No state" }, 404);
+    const state = await getStateMigrating<BackfillState>(env, "backfill:progress");
+    if (!state) return jsonResponse(env, { error: "No state" }, 404);
 
-    const state = JSON.parse(rawState) as BackfillState;
     if (!state.failedDays || state.failedDays.length === 0) return jsonResponse(env, { error: "No failed days" }, 404);
 
     const idx = state.failedDays.findIndex((f: any) => f.date === date);
@@ -517,7 +567,7 @@ async function handleBackfillFailedSkip(req: Request, env: Env): Promise<Respons
     state.failedDays.splice(idx, 1);
     state.failedDays.push(item);
 
-    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+    await setState(env, "backfill:progress", state);
 
     return jsonResponse(env, { ok: true, message: "Skipped", state });
 }
@@ -529,23 +579,19 @@ async function handleCronStatus(req: Request, env: Env): Promise<Response> {
     const rawStats = await env.FITBIT_KV.get("cron:stats");
     const stats = rawStats ? JSON.parse(rawStats) : null;
 
-    const rawBackfill = await env.FITBIT_KV.get("backfill:progress");
-    const backfill = rawBackfill ? JSON.parse(rawBackfill) : { running: false };
+    const backfill = await getStateMigrating<BackfillState>(env, "backfill:progress") || { running: false };
 
     return jsonResponse(env, { cron, stats, backfill });
 }
 
 async function handleRepairRecent(req: Request, env: Env): Promise<Response> {
-    const authRequired = await env.FITBIT_KV.get("auth:required");
-    if (authRequired === "true") return jsonResponse(env, { error: "Auth required" }, 401);
+    const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
+    if (authStatus && authStatus.required) return jsonResponse(env, { error: "Auth required" }, 401);
 
     // Check if already running
-    const rawState = await env.FITBIT_KV.get("repair:state");
-    if (rawState) {
-        const state = JSON.parse(rawState) as RepairState;
-        if (state.running) {
-            return jsonResponse(env, { ok: false, message: "Repair already running", state }, 409);
-        }
+    const state = await getStateMigrating<RepairState>(env, "repair:state");
+    if (state && state.running) {
+        return jsonResponse(env, { ok: false, message: "Repair already running", state }, 409);
     }
 
     const daysArg = new URL(req.url).searchParams.get("days") || "60";
@@ -566,7 +612,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
     const toDate = end.toISOString().split('T')[0];
 
     // Mark as running
-    await env.FITBIT_KV.put("repair:state", JSON.stringify({
+    await setState(env, "repair:state", {
         active: true,
         running: true,
         remainingDays: 0,
@@ -575,7 +621,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
         lastError: null,
         days: days,
         repairedCount: 0
-    }));
+    });
 
     try {
         // Check DB for existing dates
@@ -593,7 +639,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
         }
 
         if (missing.length === 0) {
-            await env.FITBIT_KV.put("repair:state", JSON.stringify({
+            await setState(env, "repair:state", {
                 active: false,
                 running: false,
                 remainingDays: 0,
@@ -602,7 +648,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
                 lastError: null,
                 days: days,
                 repairedCount: 0
-            }));
+            });
             return { ok: true, message: "No gaps found in range", daysChecked: days };
         }
 
@@ -636,7 +682,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
             nextRunAt = new Date(Date.now() + delayMs).toISOString();
         }
 
-        await env.FITBIT_KV.put("repair:state", JSON.stringify({
+        await setState(env, "repair:state", {
             active: shouldContinue,
             running: false,
             remainingDays: remaining,
@@ -645,7 +691,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
             lastError: hitRateLimit ? "rate_limit" : null,
             days: days,
             repairedCount: synced.length
-        }));
+        });
 
         return {
             ok: true,
@@ -656,7 +702,7 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
             nextRunAt: nextRunAt
         };
     } catch (e: any) {
-        await env.FITBIT_KV.put("repair:state", JSON.stringify({
+        await setState(env, "repair:state", {
             active: false,
             running: false,
             remainingDays: 0,
@@ -665,14 +711,13 @@ async function runRepairCycle(env: Env, days: number): Promise<any> {
             lastError: e.message,
             days: days,
             repairedCount: 0
-        }));
+        });
         throw e;
     }
 }
 
 async function handleRepairStatus(req: Request, env: Env): Promise<Response> {
-    const rawState = await env.FITBIT_KV.get("repair:state");
-    const state = rawState ? JSON.parse(rawState) as RepairState : null;
+    const state = await getStateMigrating<RepairState>(env, "repair:state");
     return jsonResponse(env, { state });
 }
 
@@ -707,11 +752,10 @@ async function handleDevCronTick(req: Request, env: Env): Promise<Response> {
 }
 
 async function handleAuthStatus(req: Request, env: Env): Promise<Response> {
-    const required = await env.FITBIT_KV.get("auth:required");
-    const lastError = await env.FITBIT_KV.get("auth:error");
+    const authStatus = await getStateMigrating<{ required: boolean, lastError: string | null }>(env, "auth:required");
     return jsonResponse(env, {
-        authRequired: required === "true",
-        lastError: lastError || null
+        authRequired: authStatus ? authStatus.required : false,
+        lastError: authStatus ? authStatus.lastError : null
     });
 }
 
@@ -739,13 +783,12 @@ async function handleHealth(req: Request, env: Env): Promise<Response> {
     // Cron & Backfill
     const cronRaw = await env.FITBIT_KV.get("cron:last_sync");
     const statsRaw = await env.FITBIT_KV.get("cron:stats");
-    const backfillRaw = await env.FITBIT_KV.get("backfill:progress");
     const cron = cronRaw ? JSON.parse(cronRaw) : null;
     const stats = statsRaw ? JSON.parse(statsRaw) : null;
-    const backfill = backfillRaw ? JSON.parse(backfillRaw) : null;
+    const backfill = await getStateMigrating<BackfillState>(env, "backfill:progress");
 
     // Auth
-    const authRequired = await env.FITBIT_KV.get("auth:required");
+    const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
 
     return jsonResponse(env, {
         ok: d1Status === "ok" && kvStatus === "ok",
@@ -755,7 +798,7 @@ async function handleHealth(req: Request, env: Env): Promise<Response> {
             latency_ms: Date.now() - start
         },
         state: {
-            auth_required: authRequired === "true",
+            auth_required: authStatus ? authStatus.required : false,
             cron_last_run: cron?.lastRunAt || cron?.timestamp,
             cron_success: cron?.success,
             cron_reliability: stats ? (stats.successes / stats.runs).toFixed(2) : "1.00",
@@ -908,8 +951,7 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
     let blockedByAuth = false;
 
     // Read initial state to preserve startedAt and failedDays
-    const rawState = await env.FITBIT_KV.get("backfill:progress");
-    const initialState = rawState ? JSON.parse(rawState) as BackfillState : null;
+    const initialState = await getStateMigrating<BackfillState>(env, "backfill:progress");
     const startedAt = initialState?.startedAt || new Date().toISOString();
     let failedDays = initialState?.failedDays || [];
 
@@ -945,12 +987,12 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
             ...initialState,
             failedDays: failedDays
         };
-        await env.FITBIT_KV.put("backfill:progress", JSON.stringify(normalizedState));
+        await setState(env, "backfill:progress", normalizedState);
     }
 
     // Check for auth_required before starting any sync
-    const authRequired = await env.FITBIT_KV.get("auth:required");
-    if (authRequired === "true") {
+    const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
+    if (authStatus && authStatus.required) {
         // Preserve lastProcessedDate to avoid chunk window shift
         const preservedLastDate = initialState?.lastProcessedDate || toDate.toISOString().split('T')[0];
         await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, preservedLastDate, "Auth required", false, 0, failedDays);
@@ -1053,8 +1095,8 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
 
     while (currentDate >= fromDate && attemptedNewDays < maxNewDaysPerTick) {
         // Check for Stop Signal
-        const stopSignal = await env.FITBIT_KV.get("backfill:stop");
-        if (stopSignal === "true") {
+        const stopSignal = await getStateMigrating<{ value: boolean }>(env, "backfill:stop");
+        if (stopSignal && stopSignal.value) {
             await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], "Stopped by user", false, 0, failedDays);
             return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: false };
         }
@@ -1143,14 +1185,11 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
     } else {
         // No days processed, ensure running is set to false without changing chunk window
         // State was already updated by updateStateOnRateLimit if rate_limit occurred
-        const rawState = await env.FITBIT_KV.get("backfill:progress");
-        if (rawState) {
-            const state = JSON.parse(rawState) as BackfillState;
-            if (state.running) {
-                state.running = false;
-                state.updatedAt = new Date().toISOString();
-                await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
-            }
+        const state = await getStateMigrating<BackfillState>(env, "backfill:progress");
+        if (state && state.running) {
+            state.running = false;
+            state.updatedAt = new Date().toISOString();
+            await setState(env, "backfill:progress", state);
         }
     }
 
@@ -1225,18 +1264,17 @@ async function updateState(env: Env, from: Date, to: Date, processed: number, to
         retries: attempts,
         failedDays: failedDays.length > 0 ? failedDays : undefined
     };
-    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+    await setState(env, "backfill:progress", state);
 }
 
 // Lightweight update that preserves chunk window state (from, to, processedDays, totalDays, lastProcessedDate)
 // Used when rate_limit occurs to avoid shifting the chunk window on retry
 async function updateStateOnRateLimit(env: Env, failedDays: Array<{ date: string, errorType: string, errorMessage: string, failedAt: string, nextRetryAt: string | null, retryCount: number }>) {
-    const rawState = await env.FITBIT_KV.get("backfill:progress");
-    if (!rawState) {
+    const existingState = await getStateMigrating<BackfillState>(env, "backfill:progress");
+    if (!existingState) {
         console.warn("updateStateOnRateLimit called but no existing state found");
         return;
     }
-    const existingState = JSON.parse(rawState) as BackfillState;
 
     // Only update these fields, preserve chunk window
     existingState.running = false;
@@ -1244,7 +1282,7 @@ async function updateStateOnRateLimit(env: Env, failedDays: Array<{ date: string
     existingState.lastError = null; // Clear error to allow retry
     existingState.failedDays = failedDays.length > 0 ? failedDays : undefined;
 
-    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(existingState));
+    await setState(env, "backfill:progress", existingState);
 }
 
 // ... handleAuth ... handleCallback ... handleToday ...
@@ -1717,7 +1755,7 @@ async function handleDay(req: Request, env: Env): Promise<Response> {
 async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, status: number, data: any }> {
     let tokens = await getTokens(env);
     if (!tokens) {
-        await env.FITBIT_KV.put("auth:required", "true");
+        await setState(env, "auth:required", { required: true, lastError: null });
         return { ok: false, status: 401, data: { error: "no_token" } };
     }
 
@@ -1730,8 +1768,7 @@ async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, s
             return true;
         } catch (e: any) {
             console.error("Token refresh failed:", e);
-            await env.FITBIT_KV.put("auth:required", "true");
-            await env.FITBIT_KV.put("auth:error", e.message || "Refresh failed");
+            await setState(env, "auth:required", { required: true, lastError: e.message || "Refresh failed" });
             return false;
         }
     };
@@ -1767,7 +1804,7 @@ async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, s
 
     if (!res.ok) {
         if (res.status === 401) {
-            await env.FITBIT_KV.put("auth:required", "true");
+            await setState(env, "auth:required", { required: true, lastError: null });
             return { ok: false, status: 401, data: null };
         }
         return { ok: false, status: res.status, data };
@@ -1857,8 +1894,7 @@ const TOKEN_KEY = "user_tokens_v1";
 
 async function storeTokens(env: Env, tokens: TokenBundle) {
     await env.FITBIT_KV.put(TOKEN_KEY, JSON.stringify(tokens));
-    await env.FITBIT_KV.delete("auth:required");
-    await env.FITBIT_KV.delete("auth:error");
+    await setState(env, "auth:required", { required: false, lastError: null });
 }
 
 async function getTokens(env: Env): Promise<TokenBundle | null> {
@@ -1970,9 +2006,8 @@ async function updateCronStats(env: Env, success: boolean, duration: number, det
     }
 
     // Add backfill retry info
-    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
-    if (rawProgress) {
-        const progress = JSON.parse(rawProgress);
+    const progress = await getStateMigrating<BackfillState>(env, "backfill:progress");
+    if (progress) {
         stats.failedDaysCount = progress.failedDays ? progress.failedDays.length : 0;
         if (progress.failedDays && progress.failedDays.length > 0 && progress.failedDays[0].nextRetryAt) {
             stats.nextRetryAt = progress.failedDays[0].nextRetryAt;
@@ -1994,8 +2029,7 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
     const nowISO = new Date(now).toISOString();
 
     // Load cron state
-    const rawCronState = await env.FITBIT_KV.get("backfill:cron_state");
-    let cronState: BackfillCronState = rawCronState ? JSON.parse(rawCronState) : {
+    let cronState = await getStateMigrating<BackfillCronState>(env, "backfill:cron_state") || {
         lastCronTickAt: null,
         lastTickAttemptAt: null,
         lastTickResult: null,
@@ -2005,36 +2039,34 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
     // Update last cron tick time
     cronState.lastCronTickAt = nowISO;
 
-    const rawPlan = await env.FITBIT_KV.get("backfill:plan");
-    if (!rawPlan) {
+    const plan = await getStateMigrating<BackfillPlan>(env, "backfill:plan");
+    if (!plan) {
         cronState.lastTickResult = 'noop';
-        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        await setState(env, "backfill:cron_state", cronState);
         return { newDays: 0, retriedDays: 0, blockedByAuth: false };
     }
 
-    const plan = JSON.parse(rawPlan) as BackfillPlan;
     if (!plan.active) {
         cronState.lastTickResult = 'noop';
-        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        await setState(env, "backfill:cron_state", cronState);
         return { newDays: 0, retriedDays: 0, blockedByAuth: false };
     }
 
     // Check for auth_required before starting any sync
-    const authRequired = await env.FITBIT_KV.get("auth:required");
-    if (authRequired === "true") {
+    const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
+    if (authStatus && authStatus.required) {
         cronState.lastTickResult = 'auth_required';
-        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        await setState(env, "backfill:cron_state", cronState);
         return { newDays: 0, retriedDays: 0, blockedByAuth: true };
     }
 
     // Determine Range
-    const rawProgress = await env.FITBIT_KV.get("backfill:progress");
-    const progress = rawProgress ? JSON.parse(rawProgress) as BackfillState : null;
+    const progress = await getStateMigrating<BackfillState>(env, "backfill:progress");
 
     // Check if already running
     if (progress?.running) {
         cronState.lastTickResult = 'noop';
-        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        await setState(env, "backfill:cron_state", cronState);
         return { newDays: 0, retriedDays: 0, blockedByAuth: false };
     }
 
@@ -2069,7 +2101,7 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
 
     if (!shouldTick) {
         cronState.lastTickResult = 'noop';
-        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        await setState(env, "backfill:cron_state", cronState);
         return { newDays: 0, retriedDays: 0, blockedByAuth: false };
     }
 
@@ -2078,7 +2110,7 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
         const nextRetryTime = new Date(cronState.nextRetryAllowedAt).getTime();
         if (now < nextRetryTime) {
             cronState.lastTickResult = 'noop';
-            await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+            await setState(env, "backfill:cron_state", cronState);
             console.log(`[Backfill] Rate limited, next retry at ${cronState.nextRetryAllowedAt}`);
             return { newDays: 0, retriedDays: 0, blockedByAuth: false };
         }
@@ -2089,7 +2121,7 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
         const timeSinceLastAttempt = now - new Date(cronState.lastTickAttemptAt).getTime();
         if (timeSinceLastAttempt < 120000) {
             cronState.lastTickResult = 'noop';
-            await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+            await setState(env, "backfill:cron_state", cronState);
             return { newDays: 0, retriedDays: 0, blockedByAuth: false };
         }
     }
@@ -2144,7 +2176,7 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
             // We reached the target!
             plan.active = false;
             plan.updatedAt = new Date().toISOString();
-            await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+            await setState(env, "backfill:plan", plan);
 
             if (progress) {
                 // Mark progress DONE
@@ -2174,7 +2206,7 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
 
         // Update Plan Timestamp
         plan.updatedAt = new Date().toISOString();
-        await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
+        await setState(env, "backfill:plan", plan);
 
         // Update cron state based on result
         if (res.blockedByAuth) {
@@ -2182,16 +2214,13 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
         } else if (res.newDays === 0 && res.retriedDays === 0) {
             cronState.lastTickResult = 'rate_limit';
             // Find earliest nextRetryAt from failed days
-            const rawEndProgress = await env.FITBIT_KV.get("backfill:progress");
-            if (rawEndProgress) {
-                const endProgress = JSON.parse(rawEndProgress) as BackfillState;
-                if (endProgress.failedDays && endProgress.failedDays.length > 0) {
-                    const earliestRetry = endProgress.failedDays
-                        .map(f => f.nextRetryAt ? new Date(f.nextRetryAt).getTime() : Infinity)
-                        .reduce((min, t) => Math.min(min, t), Infinity);
-                    if (earliestRetry !== Infinity) {
-                        cronState.nextRetryAllowedAt = new Date(earliestRetry).toISOString();
-                    }
+            const endProgress = await getStateMigrating<BackfillState>(env, "backfill:progress");
+            if (endProgress && endProgress.failedDays && endProgress.failedDays.length > 0) {
+                const earliestRetry = endProgress.failedDays
+                    .map(f => f.nextRetryAt ? new Date(f.nextRetryAt).getTime() : Infinity)
+                    .reduce((min, t) => Math.min(min, t), Infinity);
+                if (earliestRetry !== Infinity) {
+                    cronState.nextRetryAllowedAt = new Date(earliestRetry).toISOString();
                 }
             }
         } else {
@@ -2199,30 +2228,25 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
             cronState.nextRetryAllowedAt = null;
         }
 
-        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        await setState(env, "backfill:cron_state", cronState);
         return res;
     } finally {
         // Safety Clean-up: Always ensure running is false when this chunk logic finishes
-        const rawEnd = await env.FITBIT_KV.get("backfill:progress");
-        if (rawEnd) {
-            const endState = JSON.parse(rawEnd);
-            if (endState.running) {
-                endState.running = false;
-                await env.FITBIT_KV.put("backfill:progress", JSON.stringify(endState));
-            }
+        const endState = await getStateMigrating<BackfillState>(env, "backfill:progress");
+        if (endState && endState.running) {
+            endState.running = false;
+            await setState(env, "backfill:progress", endState);
         }
     }
 }
 
 async function processAutomatedRepair(env: Env): Promise<void> {
     try {
-        const authRequired = await env.FITBIT_KV.get("auth:required");
-        if (authRequired === "true") return;
+        const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
+        if (authStatus && authStatus.required) return;
 
-        const rawState = await env.FITBIT_KV.get("repair:state");
-        if (!rawState) return;
-
-        const state = JSON.parse(rawState) as RepairState;
+        const state = await getStateMigrating<RepairState>(env, "repair:state");
+        if (!state) return;
 
         // Check if should run
         if (!state.active || state.running) return;
