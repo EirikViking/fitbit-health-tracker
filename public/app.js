@@ -205,6 +205,50 @@ function getComparisonData(data, period) {
     return { current, previous };
 }
 
+// Highlight (Best/Worst) Functions
+function findBestWorst(data, metricKey, higherIsBetter = true) {
+    if (!data || !Array.isArray(data.series)) return null;
+
+    const validRows = data.series.filter(d => {
+        const val = safeNumber(d[metricKey]);
+        return val !== null && val > 0;
+    });
+
+    if (validRows.length === 0) return null;
+
+    // Sort by metric
+    const sorted = [...validRows].sort((a, b) => {
+        const aVal = safeNumber(a[metricKey]);
+        const bVal = safeNumber(b[metricKey]);
+        return higherIsBetter ? bVal - aVal : aVal - bVal;
+    });
+
+    return {
+        best: sorted[0],
+        worst: sorted[sorted.length - 1]
+    };
+}
+
+function renderHighlightCard(type, date, value, unit, metricName) {
+    const formattedDate = new Date(date).toLocaleDateString(undefined, {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric'
+    });
+
+    const emoji = type === 'best' ? '🏆' : '📉';
+    const label = type === 'best' ? 'Best Day' : 'Worst Day';
+
+    return `
+        <div class="highlight-card ${type}">
+            <div class="highlight-metric">${metricName}</div>
+            <div class="highlight-badge ${type}">${emoji} ${label}</div>
+            <div class="highlight-value">${value} <span style="font-size:0.9rem;font-weight:400;color:#666">${unit}</span></div>
+            <div class="highlight-date">📅 ${formattedDate}</div>
+        </div>
+    `;
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -1513,6 +1557,25 @@ function renderSleepTab(data) {
     // Coverage
     const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
 
+    // Find best/worst sleep days (only for daily view)
+    let highlightsHtml = '';
+    if (currentPeriod === 'daily') {
+        const highlights = findBestWorst(data, 'sleepMinutes', true);
+        if (highlights) {
+            const bestVal = (highlights.best.sleepMinutes / 60).toFixed(1);
+            const worstVal = (highlights.worst.sleepMinutes / 60).toFixed(1);
+            highlightsHtml = `
+                <div style="grid-column: 1 / -1; margin-top: 1rem;">
+                    <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.75rem; color: var(--text-secondary);">HIGHLIGHTS</div>
+                    <div class="highlights-container">
+                        ${renderHighlightCard('best', highlights.best.date, bestVal, 'hrs', 'Sleep')}
+                        ${renderHighlightCard('worst', highlights.worst.date, worstVal, 'hrs', 'Sleep')}
+                    </div>
+                </div>
+            `;
+        }
+    }
+
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
@@ -1534,6 +1597,7 @@ function renderSleepTab(data) {
             ${bestWorstHtml}
             ${createTooltip('sleep')}
         </div>
+        ${highlightsHtml}
     `;
 }
 
@@ -1570,6 +1634,29 @@ function renderRecoveryTab(data) {
     // Coverage
     const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
 
+    // Find best/worst days for RHR and HRV (only for daily view)
+    let highlightsHtml = '';
+    if (currentPeriod === 'daily') {
+        const rhrHighlights = findBestWorst(data, 'restingHr', false); // Lower is better
+        const hrvHighlights = findBestWorst(data, 'hrvRmssd', true); // Higher is better
+
+        if (rhrHighlights || hrvHighlights) {
+            highlightsHtml = '<div style="grid-column: 1 / -1; margin-top: 1rem;"><div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.75rem; color: var(--text-secondary);">HIGHLIGHTS</div><div class="highlights-container">';
+
+            if (rhrHighlights) {
+                highlightsHtml += renderHighlightCard('best', rhrHighlights.best.date, Math.round(rhrHighlights.best.restingHr), 'bpm', 'Resting HR');
+                highlightsHtml += renderHighlightCard('worst', rhrHighlights.worst.date, Math.round(rhrHighlights.worst.restingHr), 'bpm', 'Resting HR');
+            }
+
+            if (hrvHighlights) {
+                highlightsHtml += renderHighlightCard('best', hrvHighlights.best.date, Math.round(hrvHighlights.best.hrvRmssd), 'ms', 'HRV');
+                highlightsHtml += renderHighlightCard('worst', hrvHighlights.worst.date, Math.round(hrvHighlights.worst.hrvRmssd), 'ms', 'HRV');
+            }
+
+            highlightsHtml += '</div></div>';
+        }
+    }
+
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
@@ -1592,6 +1679,7 @@ function renderRecoveryTab(data) {
             <div class="kpi-meta text-xs">vs ${fmtKPI(hrvPrev, '', 0)} prev</div>
             ${createTooltip('hrv')}
         </div>
+        ${highlightsHtml}
     `;
 }
 
@@ -1611,6 +1699,28 @@ function renderActivityTab(data) {
     // Coverage
     const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
     const repairHtml = getRepairBtnHtml(repairState);
+
+    // Find best/worst activity days (only for daily view)
+    let highlightsHtml = '';
+    if (currentPeriod === 'daily') {
+        const stepsHighlights = findBestWorst(data, 'steps', true);
+        const azmHighlights = findBestWorst(data, 'azm', true);
+
+        if (stepsHighlights || azmHighlights) {
+            highlightsHtml = '<div style="grid-column: 1 / -1; margin-top: 1rem;"><div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.75rem; color: var(--text-secondary);">HIGHLIGHTS</div><div class="highlights-container">';
+
+            if (stepsHighlights) {
+                highlightsHtml += renderHighlightCard('best', stepsHighlights.best.date, Math.round(stepsHighlights.best.steps).toLocaleString(), 'steps', 'Steps');
+                highlightsHtml += renderHighlightCard('worst', stepsHighlights.worst.date, Math.round(stepsHighlights.worst.steps).toLocaleString(), 'steps', 'Steps');
+            }
+
+            if (azmHighlights && azmHighlights.best.azm > 0) {
+                highlightsHtml += renderHighlightCard('best', azmHighlights.best.date, Math.round(azmHighlights.best.azm), 'min', 'Active Zones');
+            }
+
+            highlightsHtml += '</div></div>';
+        }
+    }
 
     container.innerHTML = `
         <div class="kpi-card">
@@ -1637,6 +1747,7 @@ function renderActivityTab(data) {
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
             ${createTooltip('azm')}
         </div>
+        ${highlightsHtml}
         <div style="grid-column:1/-1">
            ${repairHtml}
         </div>
