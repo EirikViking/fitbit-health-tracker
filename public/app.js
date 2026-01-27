@@ -576,6 +576,9 @@ function renderBackfillCard(data) {
         // If plan is NOT active, and we have progress, we assume it stopped or finished.
         // If processedDays >= totalDays -> Finished.
 
+        // Check for Auth Required
+        const isAuthRequired = progress?.lastError === 'Auth required' || hasFailed && failedDays[0].errorType === 'auth_required';
+
         if (isRunning) {
             status = "Working";
             statusClass = "badge-high"; // Blueish
@@ -585,9 +588,12 @@ function renderBackfillCard(data) {
             statusClass = "badge-recovered"; // Green
             expl = "All historical data processed.";
         } else if (isActive && !isRunning) {
-            // It is active but not currently running a chunk.
-            // Distinguish "Scheduled" (Start) vs "Waiting for tick" (In between)
-            if (progress?.processedDays > 0) {
+            // Active checks
+            if (isAuthRequired) {
+                status = "Auth Required";
+                statusClass = "badge-strained";
+                expl = "Authentication required to continue.";
+            } else if (progress?.processedDays > 0) {
                 status = "Waiting for next tick";
                 statusClass = "badge-med"; // Yellow/Orange
                 expl = "Next tick will be triggered automatically.";
@@ -610,9 +616,7 @@ function renderBackfillCard(data) {
         statusEl.className = `badge ${statusClass}`;
         statusEl.textContent = status;
 
-        // Add explanation line? currently card title has badge.
-        // Let's add the explanation below the title or reuse an existing slot?
-        // We can inject it into the card header or just below.
+        // One-line explanation
         let explEl = document.getElementById('bf-expl');
         if (!explEl) {
             explEl = document.createElement('div');
@@ -620,9 +624,61 @@ function renderBackfillCard(data) {
             explEl.className = 'text-sm';
             explEl.style.marginBottom = '1rem';
             explEl.style.color = 'var(--text-secondary)';
-            card.querySelector('.card-title').after(explEl);
+            // Insert after targetMsg or info
+            let titleEl = card.querySelector('.card-title');
+            titleEl.after(explEl);
         }
         explEl.textContent = expl;
+
+        // --- Action Buttons (Auth or Resume) ---
+        let actionContainer = document.getElementById('bf-action-row');
+        if (!actionContainer) {
+            actionContainer = document.createElement('div');
+            actionContainer.id = 'bf-action-row';
+            actionContainer.style.marginBottom = '1rem';
+            explEl.after(actionContainer);
+        }
+
+        // Clear previous buttons
+        actionContainer.innerHTML = '';
+
+        if (isAuthRequired) {
+            // Show Connect Fitbit Button
+            const btn = document.createElement('a');
+            btn.className = 'btn';
+            btn.href = '/fitbit/auth'; // Reuse existing auth route
+            btn.textContent = 'Connect Fitbit';
+            btn.style.backgroundColor = 'var(--primary-color)';
+            btn.style.color = '#fff';
+            btn.style.display = 'inline-block';
+            actionContainer.appendChild(btn);
+        }
+
+        // Show Resume Button if Active & Not Running & Not Auth/Error
+        else if (isActive && !isRunning && !isAuthRequired) {
+            const btn = document.createElement('button');
+            btn.className = 'btn';
+            btn.textContent = 'Resume Backfill';
+            btn.onclick = async () => {
+                btn.disabled = true;
+                btn.textContent = 'Resuming...';
+                try {
+                    const API_BASE = window.location.origin; // robust base
+                    await fetch(`${API_BASE}/api/backfill/plan/tick`, { method: 'POST' });
+                    // We rely on polling to update UI, but let's encourage a faster refresh
+                    setTimeout(() => loadDashboard(), 1000);
+                } catch (e) {
+                    console.error("Resume failed", e);
+                    btn.textContent = 'Failed';
+                }
+            };
+            // Style distinct from main connect?
+            btn.style.backgroundColor = '#666';
+            btn.style.fontSize = '0.85rem';
+            btn.style.padding = '0.4rem 0.8rem';
+
+            actionContainer.appendChild(btn);
+        }
 
 
         // Stats

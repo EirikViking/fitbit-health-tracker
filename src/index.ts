@@ -1766,9 +1766,21 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
     const plan = JSON.parse(rawPlan) as BackfillPlan;
     if (!plan.active) return { newDays: 0, retriedDays: 0, blockedByAuth: false };
 
+    // Check for auth_required before starting any sync
+    const authRequired = await env.FITBIT_KV.get("auth:required");
+    // If auth is strictly required and we know it, fail fast
+    if (authRequired === "true") {
+        return { newDays: 0, retriedDays: 0, blockedByAuth: true };
+    }
+
     // Determine Range
     const rawProgress = await env.FITBIT_KV.get("backfill:progress");
     const progress = rawProgress ? JSON.parse(rawProgress) as BackfillState : null;
+
+    // Check if progress already has "Auth required" error
+    if (progress?.lastError === "Auth required") {
+        return { newDays: 0, retriedDays: 0, blockedByAuth: true };
+    }
 
     let toDate: Date;
     if (progress && progress.lastProcessedDate && progress.lastProcessedDate !== "DONE") {
