@@ -719,6 +719,21 @@ function csvResponse(headers: string[], rows: any[][], filename: string) {
 
 
 
+
+async function scheduleNextTick(env: Env) {
+    if (!env.APP_BASE_URL) return;
+    try {
+        console.log(`[BACKFILL] Scheduling next tick via ${env.APP_BASE_URL}/api/backfill/plan/tick`);
+        // Trigger next tick (fire and forget from perspective of current request flow, but awaited to ensure dispatch)
+        await fetch(`${env.APP_BASE_URL}/api/backfill/plan/tick`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+        });
+    } catch (e) {
+        console.error("[BACKFILL] Failed to schedule next tick", e);
+    }
+}
+
 async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays: number, maxTimeMs: number = 20000): Promise<{ newDays: number, retriedDays: number, blockedByAuth: boolean }> {
     const startTime = Date.now();
     let processedNewDays = 0;
@@ -939,8 +954,20 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
         currentDate.setDate(currentDate.getDate() - 1);
     }
 
+    // Fix: If we hit the cap but haven't finished the range, schedule the next tick immediately
+    if (attemptedNewDays >= maxNewDaysPerTick && currentDate >= fromDate) {
+        console.log(`[BACKFILL] Cap reached (${attemptedNewDays} attempts). Scheduling next tick to continue.`);
+
+        // Mark as NOT running so the next tick can start successfully
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], null, false, 0, failedDays);
+
+        // Schedule next tick
+        await scheduleNextTick(env);
+
+        return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: blockedByAuth };
+    }
+
     // Update state one last time to reflect current progress and potentially mark as not running if done
-    // Fix: Set running = false, task is done
     await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], null, false, 0, failedDays);
 
     return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: blockedByAuth };

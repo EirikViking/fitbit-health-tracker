@@ -548,13 +548,6 @@ function renderBackfillCard(data) {
         if (!card) return;
         const { plan, progress, estimatedRemainingDays, lastUpdatedAt } = data;
 
-        if ((!plan || !plan.active) && (!progress || !progress.running)) {
-            // Only show if there is something interesting
-            // If totally idle and empty, maybe hide?
-            // User requirement: "Working when progress.running true... Scheduled... Idle otherwise"
-            // We should show it if plan is present OR progress is present
-        }
-
         if (!plan && !progress) {
             card.classList.add('hidden');
             return;
@@ -566,35 +559,71 @@ function renderBackfillCard(data) {
         const isActive = plan?.active;
         const failedDays = progress?.failedDays || [];
         const hasFailed = failedDays.length > 0;
+        const done = progress?.processedDays >= progress?.totalDays && progress?.totalDays > 0;
 
         // Status Text & Badge
         const statusEl = $('bf-status-text');
-        let status = "Idle";
-        statusEl.className = "status-badge";
+        let status = "Unknown";
+        let statusClass = "badge-neutral";
+        let expl = "";
+
+        // Logic Priority:
+        // 1. Working (Running=true)
+        // 2. Complete (Processing done or reached target)
+        // 3. Waiting/Scheduled (Active=true, Running=false)
+
+        // Check "Complete" separately
+        // If plan is NOT active, and we have progress, we assume it stopped or finished.
+        // If processedDays >= totalDays -> Finished.
 
         if (isRunning) {
             status = "Working";
-            statusEl.classList.add('running');
-        } else if (hasFailed) {
-            // Check if retry scheduled
-            const nextRetry = failedDays[0].nextRetryAt;
-            if (nextRetry && new Date(nextRetry) > new Date()) {
-                status = "Retrying";
-                statusEl.classList.add('retry');
+            statusClass = "badge-high"; // Blueish
+            expl = "Processing data chunks...";
+        } else if (done || (!isActive && progress?.lastProcessedDate === 'DONE')) {
+            status = "Complete";
+            statusClass = "badge-recovered"; // Green
+            expl = "All historical data processed.";
+        } else if (isActive && !isRunning) {
+            // It is active but not currently running a chunk.
+            // Distinguish "Scheduled" (Start) vs "Waiting for tick" (In between)
+            if (progress?.processedDays > 0) {
+                status = "Waiting for next tick";
+                statusClass = "badge-med"; // Yellow/Orange
+                expl = "Next tick will be triggered automatically.";
             } else {
-                status = "Error";
-                statusEl.classList.add('retry');
+                status = "Scheduled";
+                statusClass = "badge-neutral";
+                expl = "Backfill plan created, waiting to start.";
             }
-        } else if (isActive) {
-            status = "Scheduled";
-            statusEl.classList.add('scheduled');
-        } else if (progress && progress.processedDays >= progress.totalDays && progress.totalDays > 0) {
-            status = "Done";
-            statusEl.classList.add('running'); // Re-use running color or add success? 
-            statusEl.style.background = 'var(--success-color)';
-            statusEl.style.color = 'white';
+        } else if (hasFailed) {
+            status = "Error";
+            statusClass = "badge-strained"; // Red
+            expl = "Encountered errors, checking retry policy.";
+        } else {
+            status = "Idle";
+            statusClass = "badge-neutral";
+            expl = "No active backfill plan.";
         }
+
+        // Apply
+        statusEl.className = `badge ${statusClass}`;
         statusEl.textContent = status;
+
+        // Add explanation line? currently card title has badge.
+        // Let's add the explanation below the title or reuse an existing slot?
+        // We can inject it into the card header or just below.
+        let explEl = document.getElementById('bf-expl');
+        if (!explEl) {
+            explEl = document.createElement('div');
+            explEl.id = 'bf-expl';
+            explEl.className = 'text-sm';
+            explEl.style.marginBottom = '1rem';
+            explEl.style.color = 'var(--text-secondary)';
+            card.querySelector('.card-title').after(explEl);
+        }
+        explEl.textContent = expl;
+
 
         // Stats
         $('bf-target-since').textContent = plan?.targetSince || "--";
@@ -639,6 +668,12 @@ function renderBackfillCard(data) {
         // Raw Debug
         const rawEl = $('rawBackfill');
         if (rawEl) rawEl.textContent = JSON.stringify(data, null, 2);
+
+        // Sync Overview Footer if exists
+        const ovFooter = $('overviewUpdateTimestamp');
+        if (ovFooter) {
+            ovFooter.textContent = `System updated: ${fmtLocalWithAge(lastUpdatedAt || progress?.updatedAt)}`;
+        }
 
     } catch (e) { console.warn("Backfill UI Error", e); }
 }
@@ -698,11 +733,103 @@ function renderKPIs(data) {
         `;
     };
 
-    kpiGrid.innerHTML = [
+    // 1. Data Coverage Chip
+    const earliest = sorted.length > 0 ? sorted[0].date : 'Unknown';
+    const coverageHtml = `
+        <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: flex-end;">
+            <span class="badge badge-neutral" style="font-weight: 500; font-size: 0.75rem;">Data coverage since: ${earliest}</span>
+        </div>
+    `;
+
+    // 2. Standard Cards
+    const standardCards = [
         renderCard('Resting HR', last.restingHr, 'bpm', 'restingHr', false),
         renderCard('Sleep Duration', last.sleepMinutes ? last.sleepMinutes / 60 : 0, 'hrs', 'sleepMinutes', true),
         renderCard('HRV (RMSSD)', last.hrvRmssd, 'ms', 'hrvRmssd', true)
     ].join('');
+
+    // 3. Recovery Today
+    const today = last;
+    const avgRhr = calcAvg(recent, 'restingHr') || 0;
+    const avgHrv = calcAvg(recent, 'hrvRmssd') || 0;
+
+    let recStatus = 'Neutral';
+    let recClass = 'badge-neutral';
+
+    if (today.restingHr > 0 && today.hrvRmssd > 0 && avgRhr > 0 && avgHrv > 0) {
+        if (today.hrvRmssd >= avgHrv && today.restingHr <= avgRhr) {
+            recStatus = 'Recovered';
+            recClass = 'badge-recovered';
+        } else if (today.hrvRmssd < avgHrv && today.restingHr > avgRhr) {
+            recStatus = 'Strained';
+            recClass = 'badge-strained';
+        }
+    }
+
+    const recHtml = `
+            <div class="kpi-card" style="border-left: 4px solid var(--primary-color);">
+            <div class="kpi-title">Recovery Today</div>
+            <div style="margin-bottom:0.5rem"><span class="badge ${recClass}">${recStatus}</span></div>
+            <div class="stat-block">
+                <div class="text-sm">RHR: <strong>${today.restingHr || '--'}</strong> <span class="text-xs">bpm</span></div>
+                <div class="text-sm">HRV: <strong>${today.hrvRmssd || '--'}</strong> <span class="text-xs">ms</span></div>
+            </div>
+        </div>
+    `;
+
+    // 4. Insights
+    const insights = [];
+
+    // a) HRV Trend
+    const hrvPrev = calcAvg(prior, 'hrvRmssd');
+    const hrvCurr = calcAvg(recent, 'hrvRmssd');
+    if (hrvCurr && hrvPrev) {
+        if (hrvCurr > hrvPrev * 1.05) insights.push('HRV trending up this week.');
+        else if (hrvCurr < hrvPrev * 0.95) insights.push('HRV trending down.');
+    }
+
+    // b) RHR Trend
+    const rhrPrev = calcAvg(prior, 'restingHr');
+    const rhrCurr = calcAvg(recent, 'restingHr');
+    if (rhrCurr && rhrPrev) {
+        if (rhrCurr < rhrPrev * 0.98) insights.push('Resting heart rate trending down.');
+        else if (rhrCurr > rhrPrev * 1.02) insights.push('Resting heart rate trending up.');
+    }
+
+    // c) Sleep Consistency
+    const validSleep = recent.filter(d => d.sleepMinutes > 0).map(d => d.sleepMinutes);
+    if (validSleep.length >= 4) {
+        const mean = validSleep.reduce((a, b) => a + b, 0) / validSleep.length;
+        const variance = validSleep.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / validSleep.length;
+        const stdDev = Math.sqrt(variance);
+        if (stdDev > 90) insights.push('Sleep timing was less consistent lately.');
+    }
+
+    // d) Steps/Activity
+    const stepsSum = recent.reduce((sum, d) => sum + (d.steps || 0), 0);
+    if (stepsSum < 10000 && recent.length > 3) insights.push('Activity data is limited this week.');
+
+    // Limit to 3
+    const finalInsights = insights.slice(0, 3);
+    if (finalInsights.length === 0) finalInsights.push('No notable insights yet.');
+
+    const insightsHtml = `
+        <div class="kpi-card">
+            <div class="kpi-title">Insights</div>
+            <ul style="padding-left:1.2rem; margin-top:0.5rem; font-size:0.85rem; color:var(--text-main);">
+                ${finalInsights.map(i => `<li style="margin-bottom:0.25rem">${i}</li>`).join('')}
+            </ul>
+        </div>
+    `;
+
+    // 5. Footer
+    const footerHtml = `
+        <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
+            <span id="overviewUpdateTimestamp">Waiting for status...</span>
+        </div>
+    `;
+
+    kpiGrid.innerHTML = coverageHtml + standardCards + recHtml + insightsHtml + footerHtml;
 }
 
 function renderSleepTab(data) {
