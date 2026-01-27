@@ -249,6 +249,133 @@ function renderHighlightCard(type, date, value, unit, metricName) {
     `;
 }
 
+// Personal Records (PR) Functions
+function calculatePersonalRecords(data) {
+    if (!data || !Array.isArray(data.series) || data.series.length === 0) return null;
+
+    const records = {};
+
+    // Track metrics: higher is better
+    const higherBetterMetrics = ['steps', 'sleepMinutes', 'hrvRmssd', 'azm', 'distanceKm'];
+    // Track metrics: lower is better
+    const lowerBetterMetrics = ['restingHr'];
+
+    higherBetterMetrics.forEach(metric => {
+        const validDays = data.series.filter(d => safeNumber(d[metric]) > 0);
+        if (validDays.length > 0) {
+            const best = validDays.reduce((max, d) =>
+                safeNumber(d[metric]) > safeNumber(max[metric]) ? d : max
+            );
+            records[metric] = {
+                value: safeNumber(best[metric]),
+                date: best.date,
+                higherIsBetter: true
+            };
+        }
+    });
+
+    lowerBetterMetrics.forEach(metric => {
+        const validDays = data.series.filter(d => safeNumber(d[metric]) > 0);
+        if (validDays.length > 0) {
+            const best = validDays.reduce((min, d) =>
+                safeNumber(d[metric]) < safeNumber(min[metric]) ? d : min
+            );
+            records[metric] = {
+                value: safeNumber(best[metric]),
+                date: best.date,
+                higherIsBetter: false
+            };
+        }
+    });
+
+    return records;
+}
+
+function isPR(currentValue, metricKey, records) {
+    if (!records || !records[metricKey] || currentValue === null) return false;
+
+    const record = records[metricKey];
+    if (record.higherIsBetter) {
+        return currentValue >= record.value;
+    } else {
+        return currentValue <= record.value;
+    }
+}
+
+function createPRBadge() {
+    return `<span class="pr-badge"><span class="pr-badge-icon">🏆</span> PR</span>`;
+}
+
+function renderPRSection(data) {
+    const records = calculatePersonalRecords(data);
+    if (!records) return '';
+
+    const prItems = [];
+
+    if (records.steps) {
+        prItems.push(`
+            <div class="pr-item">
+                <div class="pr-item-label">Steps</div>
+                <div class="pr-item-value">${Math.round(records.steps.value).toLocaleString()}</div>
+                <div class="pr-item-date">${new Date(records.steps.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+        `);
+    }
+
+    if (records.sleepMinutes) {
+        prItems.push(`
+            <div class="pr-item">
+                <div class="pr-item-label">Sleep</div>
+                <div class="pr-item-value">${(records.sleepMinutes.value / 60).toFixed(1)}h</div>
+                <div class="pr-item-date">${new Date(records.sleepMinutes.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+        `);
+    }
+
+    if (records.hrvRmssd) {
+        prItems.push(`
+            <div class="pr-item">
+                <div class="pr-item-label">HRV</div>
+                <div class="pr-item-value">${Math.round(records.hrvRmssd.value)} ms</div>
+                <div class="pr-item-date">${new Date(records.hrvRmssd.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+        `);
+    }
+
+    if (records.restingHr) {
+        prItems.push(`
+            <div class="pr-item">
+                <div class="pr-item-label">Resting HR</div>
+                <div class="pr-item-value">${Math.round(records.restingHr.value)} bpm</div>
+                <div class="pr-item-date">${new Date(records.restingHr.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+        `);
+    }
+
+    if (records.azm) {
+        prItems.push(`
+            <div class="pr-item">
+                <div class="pr-item-label">Active Zones</div>
+                <div class="pr-item-value">${Math.round(records.azm.value)} min</div>
+                <div class="pr-item-date">${new Date(records.azm.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+        `);
+    }
+
+    if (prItems.length === 0) return '';
+
+    return `
+        <div class="pr-section">
+            <div class="pr-section-title">
+                <span>🏆 Personal Records</span>
+            </div>
+            <div class="pr-grid">
+                ${prItems.join('')}
+            </div>
+        </div>
+    `;
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -1316,8 +1443,11 @@ function renderKPIs(data) {
     const last = rows[rows.length - 1];
     const prev = rows.length > 1 ? rows[rows.length - 2] : null;
 
+    // Calculate PRs for badge display
+    const personalRecords = calculatePersonalRecords(data);
+
     // Helper for rendering cards
-    const renderCard = (title, unit, key, higherIsBetter = true, tooltipKey = null, drilldownTarget = null) => {
+    const renderCard = (title, unit, key, higherIsBetter = true, tooltipKey = null, drilldownTarget = null, prKey = null) => {
         const val = safeNumber(last[key]);
         const prevVal = prev ? safeNumber(prev[key]) : null;
 
@@ -1379,6 +1509,12 @@ function renderKPIs(data) {
 
         let displayVal = formatValue(val);
 
+        // Check if this is a PR (only for daily period)
+        let prBadgeHtml = '';
+        if (currentPeriod === 'daily' && prKey && personalRecords && isPR(val, prKey, personalRecords)) {
+            prBadgeHtml = createPRBadge();
+        }
+
         // Add tooltip if key provided
         const tooltip = tooltipKey ? createTooltip(tooltipKey) : '';
 
@@ -1389,7 +1525,10 @@ function renderKPIs(data) {
         return `
         <div class="kpi-card" ${drilldownAttr}>
             <div class="kpi-title">${title}</div>
-            <div class="kpi-value">${displayVal} <span style="font-size:1rem;font-weight:400;color:#666">${unit}</span></div>
+            <div class="kpi-value-with-pr">
+                <div class="kpi-value">${displayVal} <span style="font-size:1rem;font-weight:400;color:#666">${unit}</span></div>
+                ${prBadgeHtml}
+            </div>
             <div class="kpi-meta">${trendHtml}</div>
             ${drilldownHint}
             ${tooltip}
@@ -1415,9 +1554,9 @@ function renderKPIs(data) {
 
     // 2. Standard Cards
     const standardCards = [
-        renderCard('Resting HR', 'bpm', 'restingHr', false, 'restingHr', 'recovery'),
-        renderCard('Sleep Duration', 'hrs', 'sleepMinutes', true, 'sleep', 'sleep'),
-        renderCard('HRV (RMSSD)', 'ms', 'hrv', true, 'hrv', 'recovery')
+        renderCard('Resting HR', 'bpm', 'restingHr', false, 'restingHr', 'recovery', 'restingHr'),
+        renderCard('Sleep Duration', 'hrs', 'sleepMinutes', true, 'sleep', 'sleep', 'sleepMinutes'),
+        renderCard('HRV (RMSSD)', 'ms', 'hrv', true, 'hrv', 'recovery', 'hrvRmssd')
     ].join('');
 
     // 3. Recovery Today (Using aggregated/safe data)
@@ -1491,13 +1630,14 @@ function renderKPIs(data) {
 
     // Footer
     const repairHtml = getRepairBtnHtml(repairState);
+    const prSectionHtml = renderPRSection(data);
     const footerHtml = `
         <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
             <span id="overviewUpdateTimestamp">Granularity applied: ${currentPeriod}</span>
         </div>
     `;
 
-    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + repairHtml + footerHtml;
+    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + repairHtml + footerHtml;
     bindRepairBtn();
 }
 
