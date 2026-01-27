@@ -1325,7 +1325,20 @@ async function syncDay(env: Env, date: string): Promise<number> {
 
     // Parse AZM
     const azmList = azmRes.data?.["activities-active-zone-minutes"];
-    const azm = (azmList && azmList[0]?.value?.activeZoneMinutes) || 0;
+    const azmEntry = azmList && azmList[0];
+    let azm = 0;
+    if (azmEntry?.value) {
+        if (typeof azmEntry.value === 'number') {
+            azm = azmEntry.value;
+        } else if (azmEntry.value.activeZoneMinutes) {
+            azm = azmEntry.value.activeZoneMinutes;
+        } else {
+            // Sum parts activeZoneMinutes is missing
+            azm = (azmEntry.value.fatBurnActiveZoneMinutes || 0) +
+                (azmEntry.value.cardioActiveZoneMinutes || 0) +
+                (azmEntry.value.peakActiveZoneMinutes || 0);
+        }
+    }
 
     // Parse Heart
     let restingHr = 0, avgHr = 0, maxHr = 0; // Avg/max not readily available in summary, default 0
@@ -1344,10 +1357,24 @@ async function syncDay(env: Env, date: string): Promise<number> {
     // Parse Sleep
     let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
     let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
+
+    // Use Summary if available (most accurate for daily total)
+    if (sleepRes.ok && sleepRes.data?.summary) {
+        sleepMinutes = sleepRes.data.summary.totalMinutesAsleep || 0;
+        timeInBed = sleepRes.data.summary.totalTimeInBed || 0;
+    }
+
     if (sleepRes.ok && sleepRes.data?.sleep?.length > 0) {
         const s = sleepRes.data.sleep.find((x: any) => x.isMainSleep) || sleepRes.data.sleep[0];
-        sleepMinutes = s.minutesAsleep || 0;
-        timeInBed = s.timeInBed || 0;
+
+        // Fallbacks if summary didn't populate
+        if (sleepMinutes === 0) {
+            sleepMinutes = s.minutesAsleep || (s.duration ? Math.round(s.duration / 60000) : 0);
+        }
+        if (timeInBed === 0) {
+            timeInBed = s.timeInBed || 0;
+        }
+
         efficiency = s.efficiency || 0;
         if (s.levels?.summary) {
             sDeep = s.levels.summary.deep?.minutes || 0;
@@ -1637,6 +1664,7 @@ async function handleCatalog(req: Request, env: Env): Promise<Response> {
             endpointUrl: "/1/user/-/activities/date/{date}.json",
             sampleFields: ["summary.steps", "summary.caloriesOut", "summary.distances[*].distance", "summary.floors"],
             numericMetrics: ["steps", "caloriesOut", "distanceKm", "floors"],
+            numericFields: ["summary.steps", "summary.caloriesOut", "summary.distances[*].distance", "summary.floors", "summary.veryActiveMinutes", "summary.fairlyActiveMinutes"],
             coverageWhere: "steps > 0 OR calories_out > 0 OR distance_km > 0 OR floors > 0"
         },
         {
@@ -1644,13 +1672,15 @@ async function handleCatalog(req: Request, env: Env): Promise<Response> {
             endpointUrl: "/1/user/-/activities/active-zone-minutes/date/{date}.json",
             sampleFields: ["activities-active-zone-minutes[0].value.activeZoneMinutes"],
             numericMetrics: ["activeZoneMinutes"],
+            numericFields: ["activities-active-zone-minutes[0].value.activeZoneMinutes", "activities-active-zone-minutes[0].value.fatBurnActiveZoneMinutes", "activities-active-zone-minutes[0].value.cardioActiveZoneMinutes", "activities-active-zone-minutes[0].value.peakActiveZoneMinutes"],
             coverageWhere: "azm > 0"
         },
         {
             name: "Sleep Summary",
             endpointUrl: "/1/user/-/sleep/date/{date}.json",
-            sampleFields: ["sleep[0].minutesAsleep", "sleep[0].timeInBed", "sleep[0].efficiency"],
+            sampleFields: ["summary.totalMinutesAsleep", "summary.totalTimeInBed", "sleep[0].minutesAsleep", "sleep[0].timeInBed", "sleep[0].efficiency"],
             numericMetrics: ["sleepMinutes", "sleepTimeInBed", "sleepEfficiency"],
+            numericFields: ["summary.totalMinutesAsleep", "summary.totalTimeInBed", "sleep[0].minutesAsleep", "sleep[0].timeInBed", "sleep[0].efficiency"],
             coverageWhere: "sleep_minutes > 0 OR sleep_time_in_bed > 0 OR sleep_efficiency > 0"
         },
         {
@@ -1658,6 +1688,7 @@ async function handleCatalog(req: Request, env: Env): Promise<Response> {
             endpointUrl: "/1/user/-/sleep/date/{date}.json",
             sampleFields: ["sleep[0].levels.summary.deep.minutes", "sleep[0].levels.summary.light.minutes", "sleep[0].levels.summary.rem.minutes", "sleep[0].levels.summary.wake.minutes"],
             numericMetrics: ["sleepDeep", "sleepLight", "sleepRem", "sleepWake"],
+            numericFields: ["sleep[0].levels.summary.deep.minutes", "sleep[0].levels.summary.light.minutes", "sleep[0].levels.summary.rem.minutes", "sleep[0].levels.summary.wake.minutes", "sleep[0].levels.summary.deep.count", "sleep[0].levels.summary.light.count", "sleep[0].levels.summary.rem.count", "sleep[0].levels.summary.wake.count"],
             coverageWhere: "sleep_deep > 0 OR sleep_light > 0 OR sleep_rem > 0 OR sleep_wake > 0"
         },
         {
@@ -1665,6 +1696,7 @@ async function handleCatalog(req: Request, env: Env): Promise<Response> {
             endpointUrl: "/1/user/-/activities/heart/date/{date}/1d.json",
             sampleFields: ["activities-heart[0].value.restingHeartRate"],
             numericMetrics: ["restingHeartRate", "averageHeartRate", "maxHeartRate"],
+            numericFields: ["activities-heart[0].value.restingHeartRate", "activities-heart[0].value.heartRateZones[0].minutes", "activities-heart[0].value.heartRateZones[1].minutes", "activities-heart[0].value.heartRateZones[2].minutes"],
             coverageWhere: "resting_hr > 0 OR avg_hr > 0 OR max_hr > 0"
         },
         {
@@ -1672,6 +1704,7 @@ async function handleCatalog(req: Request, env: Env): Promise<Response> {
             endpointUrl: "/1/user/-/activities/heart/date/{date}/1d/1min.json",
             sampleFields: ["activities-heart-intraday.dataset[*].time", "activities-heart-intraday.dataset[*].value"],
             numericMetrics: ["heartRate"],
+            numericFields: ["activities-heart-intraday.dataset[*].value"],
             coverageWhere: "resting_hr > 0"
         },
         {
@@ -1679,6 +1712,7 @@ async function handleCatalog(req: Request, env: Env): Promise<Response> {
             endpointUrl: "/1/user/-/hrv/date/{date}.json",
             sampleFields: ["hrv[0].value.dailyRmssd"],
             numericMetrics: ["hrvRmssd"],
+            numericFields: ["hrv[0].value.dailyRmssd", "hrv[0].value.deepRmssd"],
             coverageWhere: "hrv_rmssd > 0 OR hrv_coverage > 0"
         },
         {
