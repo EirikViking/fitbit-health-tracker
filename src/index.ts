@@ -951,13 +951,17 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
     // Check for auth_required before starting any sync
     const authRequired = await env.FITBIT_KV.get("auth:required");
     if (authRequired === "true") {
-        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, toDate.toISOString().split('T')[0], "Auth required", false, 0, failedDays);
+        // Preserve lastProcessedDate to avoid chunk window shift
+        const preservedLastDate = initialState?.lastProcessedDate || toDate.toISOString().split('T')[0];
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, preservedLastDate, "Auth required", false, 0, failedDays);
         return { newDays: 0, retriedDays: 0, blockedByAuth: true };
     }
 
     // Hard cap on failed days to prevent infinite growth
     if (failedDays.length >= 50) {
-        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, toDate.toISOString().split('T')[0], "Too many failed days (50+). Manual intervention required.", false, 0, failedDays);
+        // Preserve lastProcessedDate to avoid chunk window shift
+        const preservedLastDate = initialState?.lastProcessedDate || toDate.toISOString().split('T')[0];
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, preservedLastDate, "Too many failed days (50+). Manual intervention required.", false, 0, failedDays);
         return { newDays: 0, retriedDays: 0, blockedByAuth: false };
     }
 
