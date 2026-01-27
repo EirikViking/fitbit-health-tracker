@@ -1416,12 +1416,24 @@ async function syncDay(env: Env, date: string): Promise<number> {
             sleep_deep, sleep_light, sleep_rem, sleep_wake, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(date) DO UPDATE SET
-            steps=excluded.steps, calories_out=excluded.calories_out, distance_km=excluded.distance_km,
-            floors=excluded.floors, azm=excluded.azm, resting_hr=excluded.resting_hr,
-            hrv_rmssd=excluded.hrv_rmssd, sleep_minutes=excluded.sleep_minutes,
-            sleep_time_in_bed=excluded.sleep_time_in_bed, sleep_efficiency=excluded.sleep_efficiency,
-            sleep_deep=excluded.sleep_deep, sleep_light=excluded.sleep_light,
-            sleep_rem=excluded.sleep_rem, sleep_wake=excluded.sleep_wake, updated_at=excluded.updated_at
+            steps=excluded.steps, 
+            calories_out=excluded.calories_out, 
+            distance_km=excluded.distance_km,
+            floors=excluded.floors, 
+            azm=excluded.azm, 
+            resting_hr=excluded.resting_hr, 
+            avg_hr=excluded.avg_hr, 
+            max_hr=excluded.max_hr,
+            hrv_rmssd=excluded.hrv_rmssd, 
+            hrv_coverage=excluded.hrv_coverage,
+            sleep_minutes=excluded.sleep_minutes,
+            sleep_time_in_bed=excluded.sleep_time_in_bed, 
+            sleep_efficiency=excluded.sleep_efficiency,
+            sleep_deep=excluded.sleep_deep, 
+            sleep_light=excluded.sleep_light,
+            sleep_rem=excluded.sleep_rem, 
+            sleep_wake=excluded.sleep_wake, 
+            updated_at=excluded.updated_at
     `).bind(
             date, steps, caloriesOut, distanceKm, floors, azm,
             restingHr, avgHr, maxHr, hrvRmssd, hrvCoverage,
