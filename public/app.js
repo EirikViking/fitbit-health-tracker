@@ -376,6 +376,128 @@ function renderPRSection(data) {
     `;
 }
 
+// Streak Counter Functions
+function calculateStreak(data, metricKey, threshold, checkFn = null) {
+    if (!data || !Array.isArray(data.series) || data.series.length === 0) return { current: 0, longest: 0, isActive: false };
+
+    // Sort by date ascending
+    const sorted = [...data.series].sort((a, b) => a.date.localeCompare(b.date));
+
+    let currentStreak = 0;
+    let longestStreak = 0;
+    let tempStreak = 0;
+    let lastDate = null;
+    let isActive = false;
+
+    // Default check function: value >= threshold
+    const check = checkFn || ((val) => val >= threshold);
+
+    for (let i = 0; i < sorted.length; i++) {
+        const day = sorted[i];
+        const val = safeNumber(day[metricKey]);
+
+        if (val !== null && check(val)) {
+            // Check if consecutive day
+            if (lastDate) {
+                const prevDate = new Date(lastDate);
+                const currDate = new Date(day.date);
+                const diffDays = Math.round((currDate - prevDate) / (1000 * 60 * 60 * 24));
+
+                if (diffDays === 1) {
+                    tempStreak++;
+                } else {
+                    // Streak broken
+                    longestStreak = Math.max(longestStreak, tempStreak);
+                    tempStreak = 1;
+                }
+            } else {
+                tempStreak = 1;
+            }
+
+            lastDate = day.date;
+
+            // Check if this is the last day (most recent) to determine if streak is active
+            if (i === sorted.length - 1) {
+                currentStreak = tempStreak;
+                isActive = true;
+            }
+        } else {
+            // Streak broken
+            longestStreak = Math.max(longestStreak, tempStreak);
+            tempStreak = 0;
+            lastDate = null;
+
+            // If this is the last day, streak is not active
+            if (i === sorted.length - 1) {
+                currentStreak = 0;
+                isActive = false;
+            }
+        }
+    }
+
+    longestStreak = Math.max(longestStreak, tempStreak);
+    if (isActive) {
+        currentStreak = tempStreak;
+    }
+
+    return { current: currentStreak, longest: longestStreak, isActive };
+}
+
+function renderStreakCard(emoji, count, label, isActive, longest = null) {
+    const activeClass = isActive ? 'active' : 'streak-inactive';
+    const badgeHtml = isActive ? '<div class="streak-badge">🔥 Active</div>' : '';
+    const longestHtml = longest ? `<div class="text-xs" style="margin-top:0.5rem;color:var(--text-tertiary);">Longest: ${longest} days</div>` : '';
+
+    return `
+        <div class="streak-card ${activeClass}">
+            <span class="streak-emoji">${emoji}</span>
+            <div class="streak-count">${count}</div>
+            <div class="streak-label">${label}</div>
+            ${badgeHtml}
+            ${longestHtml}
+        </div>
+    `;
+}
+
+function renderStreakSection(data) {
+    if (!data || !Array.isArray(data.series)) return '';
+
+    // Calculate streaks
+    const stepsStreak = calculateStreak(data, 'steps', 8000); // 8k steps/day
+    const sleepStreak = calculateStreak(data, 'sleepMinutes', 420); // 7 hours (420 min)
+    const azmStreak = calculateStreak(data, 'azm', 30); // 30 active minutes
+
+    // Only show if at least one streak exists
+    if (stepsStreak.longest === 0 && sleepStreak.longest === 0 && azmStreak.longest === 0) return '';
+
+    const streakCards = [];
+
+    if (stepsStreak.longest > 0) {
+        streakCards.push(renderStreakCard('👟', stepsStreak.current, 'Step Streak', stepsStreak.isActive, stepsStreak.longest));
+    }
+
+    if (sleepStreak.longest > 0) {
+        streakCards.push(renderStreakCard('😴', sleepStreak.current, 'Sleep Streak', sleepStreak.isActive, sleepStreak.longest));
+    }
+
+    if (azmStreak.longest > 0) {
+        streakCards.push(renderStreakCard('💪', azmStreak.current, 'Active Streak', azmStreak.isActive, azmStreak.longest));
+    }
+
+    if (streakCards.length === 0) return '';
+
+    return `
+        <div class="streak-section">
+            <div class="streak-section-title">
+                <span>🔥 Current Streaks</span>
+            </div>
+            <div class="streak-grid">
+                ${streakCards.join('')}
+            </div>
+        </div>
+    `;
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -1631,13 +1753,14 @@ function renderKPIs(data) {
     // Footer
     const repairHtml = getRepairBtnHtml(repairState);
     const prSectionHtml = renderPRSection(data);
+    const streakSectionHtml = renderStreakSection(data);
     const footerHtml = `
         <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
             <span id="overviewUpdateTimestamp">Granularity applied: ${currentPeriod}</span>
         </div>
     `;
 
-    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + repairHtml + footerHtml;
+    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + streakSectionHtml + repairHtml + footerHtml;
     bindRepairBtn();
 }
 
