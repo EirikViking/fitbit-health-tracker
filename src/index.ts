@@ -2,6 +2,7 @@
 export interface Env {
     FITBIT_KV: KVNamespace;
     FITBIT_DB: D1Database;
+    ASSETS: Fetcher;
     FITBIT_CLIENT_ID: string;
     FITBIT_CLIENT_SECRET: string;
     FITBIT_REDIRECT_URL: string;
@@ -140,6 +141,7 @@ export default {
             if (url.pathname === "/api/activity/today") return handleActivityToday(request, env);
             if (url.pathname === "/api/activity/timeseries") return handleActivityTimeSeries(request, env);
             if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
+            if (url.pathname === "/api/catalog") return handleCatalog(request, env);
 
             // Repair
             if (url.pathname === "/api/repair/recent") return handleRepairRecent(request, env);
@@ -163,6 +165,11 @@ export default {
             if (url.pathname === "/api/backfill/plan/failed/skip") return handleBackfillFailedSkip(request, env);
             if (url.pathname === "/api/cron/status") return handleCronStatus(request, env);
             if (url.pathname === "/api/dev/cron/tick") return handleDevCronTick(request, env);
+
+            if (request.method === "GET" && (url.pathname === "/catalog" || url.pathname === "/catalog/")) {
+                const assetUrl = new URL("/catalog.html", url);
+                return env.ASSETS.fetch(new Request(assetUrl, request));
+            }
 
             return new Response("Not Found", { status: 404 });
         } catch (e: any) {
@@ -1621,6 +1628,141 @@ async function handleHRVToday(req: Request, env: Env): Promise<Response> {
     return jsonResponse(env, { summary: stats });
 }
 
+async function handleCatalog(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+
+    const resources = [
+        {
+            name: "Activity Summary",
+            endpointUrl: "/1/user/-/activities/date/{date}.json",
+            sampleFields: ["summary.steps", "summary.caloriesOut", "summary.distances[*].distance", "summary.floors"],
+            numericMetrics: ["steps", "caloriesOut", "distanceKm", "floors"],
+            coverageWhere: "steps > 0 OR calories_out > 0 OR distance_km > 0 OR floors > 0"
+        },
+        {
+            name: "Active Zone Minutes",
+            endpointUrl: "/1/user/-/activities/active-zone-minutes/date/{date}.json",
+            sampleFields: ["activities-active-zone-minutes[0].value.activeZoneMinutes"],
+            numericMetrics: ["activeZoneMinutes"],
+            coverageWhere: "azm > 0"
+        },
+        {
+            name: "Sleep Summary",
+            endpointUrl: "/1/user/-/sleep/date/{date}.json",
+            sampleFields: ["sleep[0].minutesAsleep", "sleep[0].timeInBed", "sleep[0].efficiency"],
+            numericMetrics: ["sleepMinutes", "sleepTimeInBed", "sleepEfficiency"],
+            coverageWhere: "sleep_minutes > 0 OR sleep_time_in_bed > 0 OR sleep_efficiency > 0"
+        },
+        {
+            name: "Sleep Stages",
+            endpointUrl: "/1/user/-/sleep/date/{date}.json",
+            sampleFields: ["sleep[0].levels.summary.deep.minutes", "sleep[0].levels.summary.light.minutes", "sleep[0].levels.summary.rem.minutes", "sleep[0].levels.summary.wake.minutes"],
+            numericMetrics: ["sleepDeep", "sleepLight", "sleepRem", "sleepWake"],
+            coverageWhere: "sleep_deep > 0 OR sleep_light > 0 OR sleep_rem > 0 OR sleep_wake > 0"
+        },
+        {
+            name: "Heart Rate (Daily)",
+            endpointUrl: "/1/user/-/activities/heart/date/{date}/1d.json",
+            sampleFields: ["activities-heart[0].value.restingHeartRate"],
+            numericMetrics: ["restingHeartRate", "averageHeartRate", "maxHeartRate"],
+            coverageWhere: "resting_hr > 0 OR avg_hr > 0 OR max_hr > 0"
+        },
+        {
+            name: "Heart Rate (Intraday)",
+            endpointUrl: "/1/user/-/activities/heart/date/{date}/1d/1min.json",
+            sampleFields: ["activities-heart-intraday.dataset[*].time", "activities-heart-intraday.dataset[*].value"],
+            numericMetrics: ["heartRate"],
+            coverageWhere: "resting_hr > 0"
+        },
+        {
+            name: "HRV (Daily)",
+            endpointUrl: "/1/user/-/hrv/date/{date}.json",
+            sampleFields: ["hrv[0].value.dailyRmssd"],
+            numericMetrics: ["hrvRmssd"],
+            coverageWhere: "hrv_rmssd > 0 OR hrv_coverage > 0"
+        },
+        {
+            name: "Activity Time Series (Steps)",
+            endpointUrl: "/1/user/-/activities/steps/date/{start}/{end}.json",
+            sampleFields: ["activities-steps[*].dateTime", "activities-steps[*].value"],
+            numericMetrics: ["steps"],
+            coverageWhere: "steps > 0"
+        },
+        {
+            name: "Activity Time Series (Distance)",
+            endpointUrl: "/1/user/-/activities/distance/date/{start}/{end}.json",
+            sampleFields: ["activities-distance[*].dateTime", "activities-distance[*].value"],
+            numericMetrics: ["distanceKm"],
+            coverageWhere: "distance_km > 0"
+        },
+        {
+            name: "Activity Time Series (Calories)",
+            endpointUrl: "/1/user/-/activities/calories/date/{start}/{end}.json",
+            sampleFields: ["activities-calories[*].dateTime", "activities-calories[*].value"],
+            numericMetrics: ["caloriesOut"],
+            coverageWhere: "calories_out > 0"
+        },
+        {
+            name: "Activity Time Series (Active Zone Minutes)",
+            endpointUrl: "/1/user/-/activities/active-zone-minutes/date/{start}/{end}.json",
+            sampleFields: ["activities-active-zone-minutes[*].dateTime", "activities-active-zone-minutes[*].value"],
+            numericMetrics: ["activeZoneMinutes"],
+            coverageWhere: "azm > 0"
+        }
+    ];
+
+    let rangeStart: string | null = null;
+    let rangeEnd: string | null = null;
+    let totalRows = 0;
+    try {
+        const rangeRow = await env.FITBIT_DB.prepare(
+            "SELECT MIN(date) as min_date, MAX(date) as max_date, COUNT(*) as total_rows FROM daily_metrics"
+        ).first();
+        rangeStart = rangeRow?.min_date || null;
+        rangeEnd = rangeRow?.max_date || null;
+        totalRows = Number(rangeRow?.total_rows || 0);
+    } catch (e: any) {
+        if (e.message && e.message.includes("no such table")) {
+            return jsonResponse(env, {
+                generatedAt: new Date().toISOString(),
+                range: { start: null, end: null, expectedDays: 0, totalRows: 0 },
+                resources: []
+            });
+        }
+        throw e;
+    }
+
+    const expectedDays = rangeStart && rangeEnd ? daysBetweenInclusive(rangeStart, rangeEnd) : 0;
+
+    const catalog = [];
+    for (const resource of resources) {
+        let daysPresent = 0;
+        let lastUpdated: string | null = null;
+        if (expectedDays > 0) {
+            const row = await env.FITBIT_DB.prepare(
+                `SELECT COUNT(*) as count, MAX(updated_at) as last_updated FROM daily_metrics WHERE ${resource.coverageWhere}`
+            ).first();
+            daysPresent = Number(row?.count || 0);
+            lastUpdated = row?.last_updated || null;
+        }
+
+        catalog.push({
+            resourceName: resource.name,
+            endpointUrl: resource.endpointUrl,
+            sampleFields: resource.sampleFields,
+            numericMetrics: resource.numericMetrics,
+            coverage: { daysPresent, expectedDays },
+            lastUpdated
+        });
+    }
+
+    return jsonResponse(env, {
+        generatedAt: new Date().toISOString(),
+        range: { start: rangeStart, end: rangeEnd, expectedDays, totalRows },
+        resources: catalog
+    });
+}
+
 // --- Phase 2B: D1 Handlers & Sync ---
 
 async function handleSyncTrigger(req: Request, env: Env): Promise<Response> {
@@ -1821,6 +1963,14 @@ function jsonResponse(env: Env, data: any, status = 200) {
             "Access-Control-Allow-Origin": env.APP_BASE_URL || "*"
         }
     });
+}
+
+function daysBetweenInclusive(start: string, end: string): number {
+    const startDate = new Date(`${start}T00:00:00Z`).getTime();
+    const endDate = new Date(`${end}T00:00:00Z`).getTime();
+    if (isNaN(startDate) || isNaN(endDate)) return 0;
+    if (endDate < startDate) return 0;
+    return Math.floor((endDate - startDate) / 86400000) + 1;
 }
 
 // Re-using fetchFitbitJSON with internal retry/auth handling
