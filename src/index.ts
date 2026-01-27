@@ -1324,16 +1324,20 @@ async function syncDay(env: Env, date: string): Promise<number> {
     const distanceKm = summary.distances?.find((d: any) => d.activity === "total")?.distance || 0;
 
     // Parse AZM
+    // Strict order: Resource -> total activeZoneMinutes -> Sum of parts
     const azmList = azmRes.data?.["activities-active-zone-minutes"];
     const azmEntry = azmList && azmList[0];
     let azm = 0;
+
     if (azmEntry?.value) {
         if (typeof azmEntry.value === 'number') {
+            // Direct number in some formats
             azm = azmEntry.value;
-        } else if (azmEntry.value.activeZoneMinutes) {
+        } else if (typeof azmEntry.value.activeZoneMinutes === 'number') {
+            // Explicit total
             azm = azmEntry.value.activeZoneMinutes;
         } else {
-            // Sum parts activeZoneMinutes is missing
+            // Fallback: Sum parts if explicit total is missing
             azm = (azmEntry.value.fatBurnActiveZoneMinutes || 0) +
                 (azmEntry.value.cardioActiveZoneMinutes || 0) +
                 (azmEntry.value.peakActiveZoneMinutes || 0);
@@ -1355,33 +1359,52 @@ async function syncDay(env: Env, date: string): Promise<number> {
     }
 
     // Parse Sleep
+    // Strict rules: 
+    // 1. Detailed logs first (Sum of minutesAsleep for all entries matching date)
+    // 2. Summary totalMinutesAsleep second
+    // 3. NO totalTimeInBed, NO duration (unless minutesAsleep is missing in log)
+
     let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
     let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
 
-    // Use Summary if available (most accurate for daily total)
-    if (sleepRes.ok && sleepRes.data?.summary) {
-        sleepMinutes = sleepRes.data.summary.totalMinutesAsleep || 0;
-        timeInBed = sleepRes.data.summary.totalTimeInBed || 0;
+    let hasDetailedLogs = false;
+    if (sleepRes.ok && Array.isArray(sleepRes.data?.sleep) && sleepRes.data.sleep.length > 0) {
+        hasDetailedLogs = true;
+
+        // Filter entries to ensure they belong to this date (Fitbit dateOfSleep)
+        const relevantEntries = sleepRes.data.sleep.filter((s: any) => s.dateOfSleep === date);
+
+        if (relevantEntries.length > 0) {
+            // Sum up minutesAsleep
+            sleepMinutes = relevantEntries.reduce((sum: number, s: any) => sum + (s.minutesAsleep || 0), 0);
+
+            // Taking main sleep for efficiency/stages stats
+            const mainSleep = relevantEntries.find((s: any) => s.isMainSleep) || relevantEntries[0];
+            timeInBed = (mainSleep.timeInBed || 0);
+            efficiency = mainSleep.efficiency || 0;
+
+            if (mainSleep.levels?.summary) {
+                sDeep = mainSleep.levels.summary.deep?.minutes || 0;
+                sLight = mainSleep.levels.summary.light?.minutes || 0;
+                sRem = mainSleep.levels.summary.rem?.minutes || 0;
+                sWake = mainSleep.levels.summary.wake?.minutes || 0;
+            }
+        } else {
+            // Edge case: data array has entries but none match dateOfSleep?
+            // Fallback to summary
+            hasDetailedLogs = false;
+        }
     }
 
-    if (sleepRes.ok && sleepRes.data?.sleep?.length > 0) {
-        const s = sleepRes.data.sleep.find((x: any) => x.isMainSleep) || sleepRes.data.sleep[0];
+    if (!hasDetailedLogs && sleepRes.ok && sleepRes.data?.summary) {
+        // Fallback to summary
+        sleepMinutes = sleepRes.data.summary.totalMinutesAsleep || 0;
+        // Ignoring totalTimeInBed as requested for duration
+    }
 
-        // Fallbacks if summary didn't populate
-        if (sleepMinutes === 0) {
-            sleepMinutes = s.minutesAsleep || (s.duration ? Math.round(s.duration / 60000) : 0);
-        }
-        if (timeInBed === 0) {
-            timeInBed = s.timeInBed || 0;
-        }
-
-        efficiency = s.efficiency || 0;
-        if (s.levels?.summary) {
-            sDeep = s.levels.summary.deep?.minutes || 0;
-            sLight = s.levels.summary.light?.minutes || 0;
-            sRem = s.levels.summary.rem?.minutes || 0;
-            sWake = s.levels.summary.wake?.minutes || 0;
-        }
+    // Final sanity check
+    if (sleepMinutes === 0 && sleepRes.ok && sleepRes.data?.summary?.totalMinutesAsleep > 0) {
+        sleepMinutes = sleepRes.data.summary.totalMinutesAsleep;
     }
 
     try {

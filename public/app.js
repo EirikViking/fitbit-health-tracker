@@ -988,13 +988,17 @@ async function loadDashboard() {
         // Note: Use /api/today just for auth check fallback
         const authRes = await fetch('/api/today');
         if (authRes.status === 401) {
-            $('connectSection').classList.remove('hidden');
-            $('dashboardSection').classList.add('hidden');
+            const cs = $('connectSection');
+            const ds = $('dashboardSection');
+            if (cs) cs.classList.remove('hidden');
+            if (ds) ds.classList.add('hidden');
             return;
         }
 
-        $('connectSection').classList.add('hidden');
-        $('dashboardSection').classList.remove('hidden');
+        const cs = $('connectSection');
+        const ds = $('dashboardSection');
+        if (cs) cs.classList.add('hidden');
+        if (ds) ds.classList.remove('hidden');
 
         // 2. Fetch History (60 days)
         const histRes = await fetch('/api/history?days=60');
@@ -1520,13 +1524,14 @@ function renderBackfillCard(data) {
 
             // Explicit Rate Limit / Retry Status Line
             if (err.nextRetryAt && new Date(err.nextRetryAt) > new Date()) {
-                retryRow.classList.remove('hidden');
-                $('bf-next-retry').textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
+                if(retryRow) retryRow.classList.remove('hidden');
+                const nextRetryEl = $('bf-next-retry');
+                if(nextRetryEl) nextRetryEl.textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
             } else {
-                retryRow.classList.add('hidden');
+                if(retryRow) retryRow.classList.add('hidden');
             }
         } else {
-            errSec.classList.add('hidden');
+            if(errSec) errSec.classList.add('hidden');
         }
 
         // Raw Debug
@@ -1649,7 +1654,7 @@ function renderKPIs(data) {
             const diff = val - prevVal;
             const pctChange = ((diff / prevVal) * 100).toFixed(1);
             const changeClass = diff > 0 ? (higherIsBetter ? 'positive' : 'negative') :
-                                diff < 0 ? (higherIsBetter ? 'negative' : 'positive') : 'neutral';
+                diff < 0 ? (higherIsBetter ? 'negative' : 'positive') : 'neutral';
             const changeSymbol = diff > 0 ? '↑' : diff < 0 ? '↓' : '→';
 
             const tooltip = tooltipKey ? createTooltip(tooltipKey) : '';
