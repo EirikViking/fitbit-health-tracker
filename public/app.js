@@ -494,9 +494,21 @@ async function pollBackfillStatus() {
 
     const fetchStatus = async () => {
         try {
-            const res = await fetch('/api/backfill/plan/status');
-            if (!res.ok) return 60000;
-            const data = await res.json();
+            // Fetch both status and auth state in parallel
+            const [bfRes, authRes] = await Promise.all([
+                fetch('/api/backfill/plan/status'),
+                fetch('/api/auth/status')
+            ]);
+
+            if (!bfRes.ok) return 60000;
+            const data = await bfRes.json();
+
+            // Merge auth status if available
+            if (authRes.ok) {
+                const authData = await authRes.json();
+                data.authStatus = authData;
+            }
+
             renderBackfillCard(data);
 
             // Determine next poll interval
@@ -546,7 +558,7 @@ function renderBackfillCard(data) {
     try {
         const card = $('backfillCard');
         if (!card) return;
-        const { plan, progress, estimatedRemainingDays, lastUpdatedAt } = data;
+        const { plan, progress, estimatedRemainingDays, lastUpdatedAt, authStatus } = data;
 
         if (!plan && !progress) {
             card.classList.add('hidden');
@@ -561,23 +573,24 @@ function renderBackfillCard(data) {
         const hasFailed = failedDays.length > 0;
         const done = progress?.processedDays >= progress?.totalDays && progress?.totalDays > 0;
 
+        // --- Auth Logic Refinement ---
+        const sysAuthRequired = authStatus?.authRequired === true;
+        const staleAuthError = progress?.lastError === 'Auth required' || (hasFailed && failedDays[0].errorType === 'auth_required');
+
+        // Effective Auth Required: Only if system confirms it OR we don't know status but see error.
+        // If system says NOT required, we override any stale error.
+        let isAuthRequired = false;
+        if (authStatus) {
+            isAuthRequired = sysAuthRequired;
+        } else {
+            isAuthRequired = staleAuthError;
+        }
+
         // Status Text & Badge
         const statusEl = $('bf-status-text');
         let status = "Unknown";
         let statusClass = "badge-neutral";
         let expl = "";
-
-        // Logic Priority:
-        // 1. Working (Running=true)
-        // 2. Complete (Processing done or reached target)
-        // 3. Waiting/Scheduled (Active=true, Running=false)
-
-        // Check "Complete" separately
-        // If plan is NOT active, and we have progress, we assume it stopped or finished.
-        // If processedDays >= totalDays -> Finished.
-
-        // Check for Auth Required
-        const isAuthRequired = progress?.lastError === 'Auth required' || hasFailed && failedDays[0].errorType === 'auth_required';
 
         if (isRunning) {
             status = "Working";
@@ -593,6 +606,11 @@ function renderBackfillCard(data) {
                 status = "Auth Required";
                 statusClass = "badge-strained";
                 expl = "Authentication required to continue.";
+            } else if (staleAuthError && !sysAuthRequired) {
+                // Recovered state
+                status = "Resuming...";
+                statusClass = "badge-med";
+                expl = "Auth restored. Clearing previous status...";
             } else if (progress?.processedDays > 0) {
                 status = "Waiting for next tick";
                 statusClass = "badge-med"; // Yellow/Orange

@@ -1777,9 +1777,16 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
     const rawProgress = await env.FITBIT_KV.get("backfill:progress");
     const progress = rawProgress ? JSON.parse(rawProgress) as BackfillState : null;
 
-    // Check if progress already has "Auth required" error
+    // Check if progress has "Auth required" error BUT authRequired is false
+    // Meaning we recovered, so we should clear the error and proceed
     if (progress?.lastError === "Auth required") {
-        return { newDays: 0, retriedDays: 0, blockedByAuth: true };
+        console.log("[Backfill] Clearing stale 'Auth required' error as auth is restored.");
+        progress.lastError = null;
+        // We must persist this clearance, but we can do it by just letting flow continue
+        // and updateState will override it eventually, OR we update KV now.
+        // It's safer to just modify in memory for this function's scope, 
+        // and let the final updateState save it. 
+        // BUT updateState is called deeper. Let's rely on that.
     }
 
     let toDate: Date;
