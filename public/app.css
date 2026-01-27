@@ -325,6 +325,75 @@ nav {
   animation: fadeIn 0.6s var(--transition-base);
 }
 
+/* Range Picker */
+.range-picker {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  align-items: center;
+  margin: var(--spacing-sm) 0;
+  padding: var(--spacing-sm);
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+  animation: fadeIn 0.6s var(--transition-base);
+  flex-wrap: wrap;
+}
+
+.range-picker-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-semibold);
+  margin-right: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.range-btn {
+  background: transparent;
+  border: 1px solid var(--glass-border);
+  color: var(--text-secondary);
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-medium);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all var(--transition-base);
+  white-space: nowrap;
+}
+
+.range-btn:hover {
+  background: rgba(102, 126, 234, 0.1);
+  color: var(--text-primary);
+  border-color: var(--primary-solid);
+  transform: translateY(-1px);
+}
+
+.range-btn.active {
+  background: var(--primary-solid);
+  color: white;
+  border-color: var(--primary-solid);
+  box-shadow: var(--shadow-glow);
+  font-weight: var(--font-weight-semibold);
+}
+
+.range-btn:active {
+  transform: translateY(0);
+}
+
+.range-display {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  margin-left: 0.5rem;
+  padding: 0.3rem 0.7rem;
+  background: rgba(102, 126, 234, 0.05);
+  border-radius: var(--radius-sm);
+  font-weight: var(--font-weight-medium);
+}
+
 .btn-secondary {
   background: var(--glass-bg);
   backdrop-filter: blur(10px);

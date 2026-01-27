@@ -5,6 +5,9 @@ let dashboardData = null;
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
 let viewMode = 'calendar';
 let repairState = null;
+let currentRange = localStorage.getItem('fitbit_range') || 'all'; // 7d, 30d, 90d, ytd, all
+let rangeStartDate = null;
+let rangeEndDate = null;
 const $ = (id) => document.getElementById(id);
 
 // Tooltip Database
@@ -80,6 +83,98 @@ function createTooltip(metricKey) {
     `;
 }
 
+// Range Picker Functions
+function calculateDateRange(rangeType) {
+    const today = new Date();
+    const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate()); // Today at midnight
+    let startDate;
+
+    switch (rangeType) {
+        case '7d':
+            startDate = new Date(endDate);
+            startDate.setDate(endDate.getDate() - 6); // Last 7 days including today
+            break;
+        case '30d':
+            startDate = new Date(endDate);
+            startDate.setDate(endDate.getDate() - 29); // Last 30 days including today
+            break;
+        case '90d':
+            startDate = new Date(endDate);
+            startDate.setDate(endDate.getDate() - 89); // Last 90 days including today
+            break;
+        case 'ytd':
+            startDate = new Date(endDate.getFullYear(), 0, 1); // Jan 1 of current year
+            break;
+        case 'all':
+        default:
+            return { startDate: null, endDate: null }; // No filtering
+    }
+
+    return {
+        startDate: startDate.toISOString().split('T')[0],
+        endDate: endDate.toISOString().split('T')[0]
+    };
+}
+
+function filterDataByRange(data, startDate, endDate) {
+    if (!data || !Array.isArray(data.series)) return data;
+    if (!startDate || !endDate) return data; // No filtering
+
+    const filtered = {
+        ...data,
+        series: data.series.filter(d => {
+            return d.date >= startDate && d.date <= endDate;
+        })
+    };
+
+    return filtered;
+}
+
+function setRange(rangeType, shouldRender = true) {
+    currentRange = rangeType;
+    localStorage.setItem('fitbit_range', rangeType);
+
+    // Calculate date range
+    const { startDate, endDate } = calculateDateRange(rangeType);
+    rangeStartDate = startDate;
+    rangeEndDate = endDate;
+
+    // Update UI
+    document.querySelectorAll('.range-btn').forEach(btn => {
+        if (btn.dataset.range === rangeType) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+
+    // Update range display
+    const rangeDisplay = document.getElementById('rangeDisplay');
+    if (rangeDisplay) {
+        if (startDate && endDate) {
+            const start = new Date(startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+            const end = new Date(endDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+            rangeDisplay.textContent = `${start} - ${end}`;
+        } else {
+            rangeDisplay.textContent = 'All available data';
+        }
+    }
+
+    // Re-render with filtered data
+    if (shouldRender && dashboardData) {
+        renderAll();
+    }
+}
+
+// Get filtered dashboard data based on current range
+function getFilteredDashboardData() {
+    if (!dashboardData) return null;
+    if (currentRange === 'all' || !rangeStartDate || !rangeEndDate) {
+        return dashboardData;
+    }
+    return filterDataByRange(dashboardData, rangeStartDate, rangeEndDate);
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -147,8 +242,34 @@ document.addEventListener('DOMContentLoaded', () => {
     // Init granular buttons state
     setPeriod(currentPeriod, false);
 
-    // Inject View Mode Toggle
+    // Inject Range Picker
     const periodToggle = $('periodToggle');
+    if (periodToggle) {
+        const rangePicker = document.createElement('div');
+        rangePicker.className = 'range-picker';
+        rangePicker.innerHTML = `
+            <span class="range-picker-label">Date Range:</span>
+            <button class="range-btn" data-range="7d">7 Days</button>
+            <button class="range-btn" data-range="30d">30 Days</button>
+            <button class="range-btn" data-range="90d">90 Days</button>
+            <button class="range-btn" data-range="ytd">YTD</button>
+            <button class="range-btn" data-range="all">All Time</button>
+            <span id="rangeDisplay" class="range-display">All available data</span>
+        `;
+        periodToggle.insertAdjacentElement('afterend', rangePicker);
+
+        // Bind range button clicks
+        document.querySelectorAll('.range-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setRange(btn.dataset.range, true);
+            });
+        });
+
+        // Initialize range
+        setRange(currentRange, false);
+    }
+
+    // Inject View Mode Toggle
     if (periodToggle) {
         const div = document.createElement('div');
         div.className = 'view-mode-toggle';
@@ -246,13 +367,14 @@ window.setPeriod = function (period, shouldRender = true) {
 };
 
 window.renderAll = function () {
-    console.log('[App] Rendering all with period:', currentPeriod);
+    console.log('[App] Rendering all with period:', currentPeriod, 'range:', currentRange);
+    const filteredData = getFilteredDashboardData();
     renderCharts();
-    renderKPIs(dashboardData);
-    renderSleepTab(dashboardData);
-    renderRecoveryTab(dashboardData);
-    renderActivityTab(dashboardData);
-    renderExportTab(dashboardData); // Ensure exports updated
+    renderKPIs(filteredData);
+    renderSleepTab(filteredData);
+    renderRecoveryTab(filteredData);
+    renderActivityTab(filteredData);
+    renderExportTab(filteredData); // Ensure exports updated
 };
 
 window.switchTab = function (tabName) {
@@ -506,10 +628,11 @@ async function loadDashboard() {
 }
 
 function renderCharts() {
-    if (!dashboardData) return;
+    const filteredData = getFilteredDashboardData();
+    if (!filteredData) return;
 
     // Normalize data for current period
-    const rows = normalizeForPeriod(dashboardData, currentPeriod) || [];
+    const rows = normalizeForPeriod(filteredData, currentPeriod) || [];
 
     // Clean up if empty
     if (rows.length === 0) {
