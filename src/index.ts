@@ -143,6 +143,7 @@ export default {
 
             // Repair
             if (url.pathname === "/api/repair/recent") return handleRepairRecent(request, env);
+            if (url.pathname === "/api/repair/status") return handleRepairStatus(request, env);
 
             // Phase 2B: D1 History & Sync
 
@@ -221,6 +222,9 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
             bfStats = await processAutomatedBackfillChunk(env);
             console.log(`[CRON] Backfill processed: ${bfStats.newDays} new, ${bfStats.retriedDays} retried, blockedByAuth: ${bfStats.blockedByAuth}`);
 
+            // D) Process repair automation
+            await processAutomatedRepair(env);
+
         } catch (e: any) {
             error = e.message || 'Unknown error';
             console.error(`[CRON] Error: ${error}`);
@@ -278,6 +282,17 @@ interface BackfillState {
         nextRetryAt: string | null;
         retryCount: number;
     }>;
+}
+
+interface RepairState {
+    active: boolean;
+    running: boolean;
+    remainingDays: number;
+    lastRunAt: string | null;
+    nextRunAt: string | null;
+    lastError: string | null;
+    days: number;
+    repairedCount: number;
 }
 
 async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -501,10 +516,25 @@ async function handleRepairRecent(req: Request, env: Env): Promise<Response> {
     const authRequired = await env.FITBIT_KV.get("auth:required");
     if (authRequired === "true") return jsonResponse(env, { error: "Auth required" }, 401);
 
+    // Check if already running
+    const rawState = await env.FITBIT_KV.get("repair:state");
+    if (rawState) {
+        const state = JSON.parse(rawState) as RepairState;
+        if (state.running) {
+            return jsonResponse(env, { ok: false, message: "Repair already running", state }, 409);
+        }
+    }
+
     const daysArg = new URL(req.url).searchParams.get("days") || "60";
     const days = parseInt(daysArg, 10);
     if (isNaN(days) || days < 1 || days > 90) return jsonResponse(env, { error: "Invalid days (1-90)" }, 400);
 
+    const result = await runRepairCycle(env, days);
+    return jsonResponse(env, result);
+}
+
+async function runRepairCycle(env: Env, days: number): Promise<any> {
+    const now = new Date();
     const end = new Date();
     const start = new Date();
     start.setDate(start.getDate() - days);
@@ -512,50 +542,116 @@ async function handleRepairRecent(req: Request, env: Env): Promise<Response> {
     const fromDate = start.toISOString().split('T')[0];
     const toDate = end.toISOString().split('T')[0];
 
-    // Check DB for existing dates
-    const { results } = await env.FITBIT_DB.prepare(
-        "SELECT date FROM daily_metrics WHERE date >= ? AND date <= ?"
-    ).bind(fromDate, toDate).all();
+    // Mark as running
+    await env.FITBIT_KV.put("repair:state", JSON.stringify({
+        active: true,
+        running: true,
+        remainingDays: 0,
+        lastRunAt: now.toISOString(),
+        nextRunAt: null,
+        lastError: null,
+        days: days,
+        repairedCount: 0
+    }));
 
-    const existing = new Set((results || []).map((r: any) => r.date));
-    const missing: string[] = [];
+    try {
+        // Check DB for existing dates
+        const { results } = await env.FITBIT_DB.prepare(
+            "SELECT date FROM daily_metrics WHERE date >= ? AND date <= ?"
+        ).bind(fromDate, toDate).all();
 
-    // Iterate dates
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        const iso = d.toISOString().split('T')[0];
-        if (!existing.has(iso)) missing.push(iso);
-    }
+        const existing = new Set((results || []).map((r: any) => r.date));
+        const missing: string[] = [];
 
-    if (missing.length === 0) {
-        return jsonResponse(env, { ok: true, message: "No gaps found in range", daysChecked: days });
-    }
-
-    // Attempt to fill holes (Rate limited batch)
-    // We limit to 3 days per request to avoid hitting 150 req/hr limit too fast (approx 12-15 calls per day repaired)
-    const maxToSync = 3;
-    const toSync = missing.slice(0, maxToSync);
-    const synced: string[] = [];
-    const errors: any[] = [];
-
-    for (const date of toSync) {
-        try {
-            await syncDay(env, date);
-            synced.push(date);
-        } catch (e: any) {
-            errors.push({ date, error: e.message });
-            if (e.message.includes('429')) break;
+        // Iterate dates
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            const iso = d.toISOString().split('T')[0];
+            if (!existing.has(iso)) missing.push(iso);
         }
-    }
 
-    return jsonResponse(env, {
-        ok: true,
-        message: `Repaired ${synced.length} days`,
-        repaired: synced,
-        remaining: missing.length - synced.length,
-        errors: errors.length > 0 ? errors : undefined
-    });
+        if (missing.length === 0) {
+            await env.FITBIT_KV.put("repair:state", JSON.stringify({
+                active: false,
+                running: false,
+                remainingDays: 0,
+                lastRunAt: now.toISOString(),
+                nextRunAt: null,
+                lastError: null,
+                days: days,
+                repairedCount: 0
+            }));
+            return { ok: true, message: "No gaps found in range", daysChecked: days };
+        }
+
+        // Attempt to fill holes (Rate limited batch)
+        const maxToSync = 3;
+        const toSync = missing.slice(0, maxToSync);
+        const synced: string[] = [];
+        const errors: any[] = [];
+        let hitRateLimit = false;
+
+        for (const date of toSync) {
+            try {
+                await syncDay(env, date);
+                synced.push(date);
+            } catch (e: any) {
+                errors.push({ date, error: e.message });
+                if (e.message.includes('429')) {
+                    hitRateLimit = true;
+                    break;
+                }
+            }
+        }
+
+        const remaining = missing.length - synced.length;
+        const shouldContinue = remaining > 0;
+
+        // Determine next run time
+        let nextRunAt = null;
+        if (shouldContinue) {
+            const delayMs = hitRateLimit ? 5 * 60 * 1000 : 2 * 60 * 1000; // 5min for rate limit, 2min otherwise
+            nextRunAt = new Date(Date.now() + delayMs).toISOString();
+        }
+
+        await env.FITBIT_KV.put("repair:state", JSON.stringify({
+            active: shouldContinue,
+            running: false,
+            remainingDays: remaining,
+            lastRunAt: now.toISOString(),
+            nextRunAt: nextRunAt,
+            lastError: hitRateLimit ? "rate_limit" : null,
+            days: days,
+            repairedCount: synced.length
+        }));
+
+        return {
+            ok: true,
+            message: `Repaired ${synced.length} days`,
+            repaired: synced,
+            remaining: remaining,
+            errors: errors.length > 0 ? errors : undefined,
+            nextRunAt: nextRunAt
+        };
+    } catch (e: any) {
+        await env.FITBIT_KV.put("repair:state", JSON.stringify({
+            active: false,
+            running: false,
+            remainingDays: 0,
+            lastRunAt: now.toISOString(),
+            nextRunAt: null,
+            lastError: e.message,
+            days: days,
+            repairedCount: 0
+        }));
+        throw e;
+    }
 }
 
+async function handleRepairStatus(req: Request, env: Env): Promise<Response> {
+    const rawState = await env.FITBIT_KV.get("repair:state");
+    const state = rawState ? JSON.parse(rawState) as RepairState : null;
+    return jsonResponse(env, { state });
+}
 
 async function handleDevCronTick(req: Request, env: Env): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
@@ -1917,5 +2013,30 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
                 await env.FITBIT_KV.put("backfill:progress", JSON.stringify(endState));
             }
         }
+    }
+}
+
+async function processAutomatedRepair(env: Env): Promise<void> {
+    try {
+        const authRequired = await env.FITBIT_KV.get("auth:required");
+        if (authRequired === "true") return;
+
+        const rawState = await env.FITBIT_KV.get("repair:state");
+        if (!rawState) return;
+
+        const state = JSON.parse(rawState) as RepairState;
+
+        // Check if should run
+        if (!state.active || state.running) return;
+        if (!state.nextRunAt) return;
+
+        const now = Date.now();
+        const nextRun = new Date(state.nextRunAt).getTime();
+        if (now < nextRun) return;
+
+        console.log(`[CRON] Running automated repair cycle (${state.remainingDays} days remaining)`);
+        await runRepairCycle(env, state.days);
+    } catch (e: any) {
+        console.error(`[CRON] Repair automation error: ${e.message}`);
     }
 }

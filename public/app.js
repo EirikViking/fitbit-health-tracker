@@ -4,6 +4,7 @@ let charts = {};
 let dashboardData = null;
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
 let viewMode = 'calendar';
+let repairState = null;
 const $ = (id) => document.getElementById(id);
 
 // Init
@@ -539,10 +540,11 @@ async function pollBackfillStatus() {
 
     const fetchStatus = async () => {
         try {
-            // Fetch both status and auth state in parallel
-            const [bfRes, authRes] = await Promise.all([
+            // Fetch status, auth state, and repair state in parallel
+            const [bfRes, authRes, repairRes] = await Promise.all([
                 fetch('/api/backfill/plan/status'),
-                fetch('/api/auth/status')
+                fetch('/api/auth/status'),
+                fetch('/api/repair/status')
             ]);
 
             if (!bfRes.ok) return 60000;
@@ -552,6 +554,12 @@ async function pollBackfillStatus() {
             if (authRes.ok) {
                 const authData = await authRes.json();
                 data.authStatus = authData;
+            }
+
+            // Update global repair state
+            if (repairRes.ok) {
+                const repairData = await repairRes.json();
+                repairState = repairData.state;
             }
 
             renderBackfillCard(data);
@@ -798,7 +806,32 @@ function renderBackfillCard(data) {
 }
 
 // Repair Button Helper
-function getRepairBtnHtml() {
+function getRepairBtnHtml(repairState) {
+    if (!repairState) {
+        return `
+        <div style="margin-top:1.5rem; text-align:center;">
+            <button class="btn-secondary repair-btn-action" style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
+                Repair recent gaps (last 60d)
+            </button>
+        </div>
+        `;
+    }
+
+    // Show status if repair is active
+    if (repairState.active) {
+        const nextRunStr = repairState.nextRunAt ? new Date(repairState.nextRunAt).toLocaleTimeString() : 'soon';
+        return `
+        <div style="margin-top:1.5rem; text-align:center;">
+            <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:0.5rem;">
+                Repair: ${repairState.remainingDays} days remaining. Next run: ${nextRunStr}
+            </div>
+            <button class="btn-secondary repair-btn-action" disabled style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
+                Automation running...
+            </button>
+        </div>
+        `;
+    }
+
     return `
     <div style="margin-top:1.5rem; text-align:center;">
         <button class="btn-secondary repair-btn-action" style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
@@ -816,28 +849,31 @@ function bindRepairBtn() {
         btn.onclick = async () => {
             btn.disabled = true;
             const originalText = btn.textContent;
-            btn.textContent = 'Scanning & Repairing...';
+            btn.textContent = 'Starting repair...';
             try {
                 const res = await fetch('/api/repair/recent?days=60');
                 const j = await res.json();
 
                 if (!j.ok) {
                     showToast(j.error || 'Failed', 'error');
+                    btn.disabled = false;
+                    btn.textContent = originalText;
                 } else {
-                    if (j.remaining > 0) showToast(`Repaired ${j.repaired.length}. ${j.remaining} days left to check. Click again later.`, 'info');
-                    else showToast(j.message || 'Repair complete', 'success');
+                    if (j.remaining > 0) {
+                        showToast(`Repaired ${j.repaired.length}. Automation will continue (${j.remaining} days remaining).`, 'success');
+                    } else {
+                        showToast(j.message || 'Repair complete', 'success');
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
 
                     if (j.repaired && j.repaired.length > 0) loadDashboard();
                 }
             } catch (e) {
                 console.error(e);
                 showToast(e.message, 'error');
-            } finally {
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.textContent = originalText;
-                }, 300000); // 5 min cooldown visual
-                btn.textContent = `Cooldown (5m)...`;
+                btn.disabled = false;
+                btn.textContent = originalText;
             }
         };
     });
@@ -982,7 +1018,7 @@ function renderKPIs(data) {
     `;
 
     // Footer
-    const repairHtml = getRepairBtnHtml();
+    const repairHtml = getRepairBtnHtml(repairState);
     const footerHtml = `
         <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
             <span id="overviewUpdateTimestamp">Granularity applied: ${currentPeriod}</span>
@@ -1140,7 +1176,7 @@ function renderActivityTab(data) {
 
     // Coverage
     const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
-    const repairHtml = getRepairBtnHtml();
+    const repairHtml = getRepairBtnHtml(repairState);
 
     container.innerHTML = `
         <div class="kpi-card">
