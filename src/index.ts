@@ -141,6 +141,9 @@ export default {
             if (url.pathname === "/api/activity/timeseries") return handleActivityTimeSeries(request, env);
             if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
 
+            // Repair
+            if (url.pathname === "/api/repair/recent") return handleRepairRecent(request, env);
+
             // Phase 2B: D1 History & Sync
 
             // --- Phase 2D: D1 History & Sync ---
@@ -493,6 +496,66 @@ async function handleCronStatus(req: Request, env: Env): Promise<Response> {
 
     return jsonResponse(env, { cron, stats, backfill });
 }
+
+async function handleRepairRecent(req: Request, env: Env): Promise<Response> {
+    const authRequired = await env.FITBIT_KV.get("auth:required");
+    if (authRequired === "true") return jsonResponse(env, { error: "Auth required" }, 401);
+
+    const daysArg = new URL(req.url).searchParams.get("days") || "60";
+    const days = parseInt(daysArg, 10);
+    if (isNaN(days) || days < 1 || days > 90) return jsonResponse(env, { error: "Invalid days (1-90)" }, 400);
+
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - days);
+
+    const fromDate = start.toISOString().split('T')[0];
+    const toDate = end.toISOString().split('T')[0];
+
+    // Check DB for existing dates
+    const { results } = await env.FITBIT_DB.prepare(
+        "SELECT date FROM daily_metrics WHERE date >= ? AND date <= ?"
+    ).bind(fromDate, toDate).all();
+
+    const existing = new Set((results || []).map((r: any) => r.date));
+    const missing: string[] = [];
+
+    // Iterate dates
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        const iso = d.toISOString().split('T')[0];
+        if (!existing.has(iso)) missing.push(iso);
+    }
+
+    if (missing.length === 0) {
+        return jsonResponse(env, { ok: true, message: "No gaps found in range", daysChecked: days });
+    }
+
+    // Attempt to fill holes (Rate limited batch)
+    // We limit to 3 days per request to avoid hitting 150 req/hr limit too fast (approx 12-15 calls per day repaired)
+    const maxToSync = 3;
+    const toSync = missing.slice(0, maxToSync);
+    const synced: string[] = [];
+    const errors: any[] = [];
+
+    for (const date of toSync) {
+        try {
+            await syncDay(env, date);
+            synced.push(date);
+        } catch (e: any) {
+            errors.push({ date, error: e.message });
+            if (e.message.includes('429')) break;
+        }
+    }
+
+    return jsonResponse(env, {
+        ok: true,
+        message: `Repaired ${synced.length} days`,
+        repaired: synced,
+        remaining: missing.length - synced.length,
+        errors: errors.length > 0 ? errors : undefined
+    });
+}
+
 
 async function handleDevCronTick(req: Request, env: Env): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });

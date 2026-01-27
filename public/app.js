@@ -3,6 +3,7 @@
 let charts = {};
 let dashboardData = null;
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
+let viewMode = 'calendar';
 const $ = (id) => document.getElementById(id);
 
 // Init
@@ -11,7 +12,33 @@ document.addEventListener('DOMContentLoaded', () => {
     $('closeModal').addEventListener('click', () => $('dayModal').classList.remove('open'));
 
     // Init granular buttons state
-    setPeriod(currentPeriod, false); // false = don't render yet, just UI state
+    setPeriod(currentPeriod, false);
+
+    // Inject View Mode Toggle
+    const periodToggle = $('periodToggle');
+    if (periodToggle) {
+        const div = document.createElement('div');
+        div.className = 'view-mode-toggle';
+        div.style.marginTop = '0.5rem';
+        div.style.textAlign = 'center';
+        div.innerHTML = `
+            <label style="font-size:0.8rem; margin-right:0.5rem; color:var(--text-secondary)">View Mode:</label>
+            <select id="viewModeSelect" style="padding:0.2rem; border-radius:4px; border:1px solid #ccc; font-size:0.8rem; background:white;">
+                <option value="calendar">Calendar Period</option>
+                <option value="rolling">Rolling Window</option>
+            </select>
+         `;
+        // Insert after the period toggle
+        periodToggle.insertAdjacentElement('afterend', div);
+
+        const sel = $('viewModeSelect');
+        sel.value = viewMode;
+        sel.onchange = (e) => {
+            viewMode = e.target.value;
+            // Re-render
+            renderAll();
+        };
+    }
 
     // Close modal on outside click
     $('dayModal').addEventListener('click', (e) => {
@@ -144,12 +171,16 @@ function aggregateMetrics(series, keyFn, type) {
                 steps: 0,
                 caloriesOut: 0,
                 distanceKm: 0,
-                azm: 0
+                azm: 0,
+                startDate: d.date,
+                endDate: d.date
             };
         }
 
         const m = map[key];
         m.count++;
+        if (d.date < m.startDate) m.startDate = d.date;
+        if (d.date > m.endDate) m.endDate = d.date;
 
         // Averages
         if (d.restingHr > 0) { m.restingHrSum += Number(d.restingHr); m.restingHrCount++; }
@@ -177,6 +208,8 @@ function aggregateMetrics(series, keyFn, type) {
             azm: m.azm,
             days: m.count,
             expectedDays: m.expectedDays,
+            startDate: m.startDate,
+            endDate: m.endDate,
 
             // Coverage stats per metric
             coverage: {
@@ -250,8 +283,8 @@ async function loadDashboard() {
         $('connectSection').classList.add('hidden');
         $('dashboardSection').classList.remove('hidden');
 
-        // 2. Fetch History (30 days)
-        const histRes = await fetch('/api/history?days=30');
+        // 2. Fetch History (60 days)
+        const histRes = await fetch('/api/history?days=60');
         if (!histRes.ok) throw new Error('Failed to fetch history');
         const data = await histRes.json();
 
@@ -764,6 +797,52 @@ function renderBackfillCard(data) {
     } catch (e) { console.warn("Backfill UI Error", e); }
 }
 
+// Repair Button Helper
+function getRepairBtnHtml() {
+    return `
+    <div style="margin-top:1.5rem; text-align:center;">
+        <button class="btn-secondary repair-btn-action" style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
+            Repair recent gaps (last 60d)
+        </button>
+    </div>
+    `;
+}
+
+function bindRepairBtn() {
+    document.querySelectorAll('.repair-btn-action').forEach(btn => {
+        if (btn.dataset.bound) return;
+        btn.dataset.bound = "true";
+
+        btn.onclick = async () => {
+            btn.disabled = true;
+            const originalText = btn.textContent;
+            btn.textContent = 'Scanning & Repairing...';
+            try {
+                const res = await fetch('/api/repair/recent?days=60');
+                const j = await res.json();
+
+                if (!j.ok) {
+                    showToast(j.error || 'Failed', 'error');
+                } else {
+                    if (j.remaining > 0) showToast(`Repaired ${j.repaired.length}. ${j.remaining} days left to check. Click again later.`, 'info');
+                    else showToast(j.message || 'Repair complete', 'success');
+
+                    if (j.repaired && j.repaired.length > 0) loadDashboard();
+                }
+            } catch (e) {
+                console.error(e);
+                showToast(e.message, 'error');
+            } finally {
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                }, 300000); // 5 min cooldown visual
+                btn.textContent = `Cooldown (5m)...`;
+            }
+        };
+    });
+}
+
 function renderKPIs(data) {
     const kpiGrid = $('overviewKPIs');
     if (!kpiGrid || !data) return;
@@ -813,14 +892,18 @@ function renderKPIs(data) {
         `;
     };
 
-    // 1. Data Coverage Chip
+    // 1. Data Coverage & Header
+    let dateRangeStr = last.date;
+    if (currentPeriod !== 'daily' && last.startDate && last.endDate) {
+        dateRangeStr = `${new Date(last.startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${new Date(last.endDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+    }
+
     const coverageVal = calcCoverage(last);
-    const lastDate = last.date || 'Unknown';
-    const coverageHtml = `
+    const headerHtml = `
         <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items:center;">
-             <span style="font-size:0.75rem; color:var(--text-secondary);">Latest: ${lastDate}</span>
+             <span style="font-size:0.85rem; font-weight:600; color:var(--text-main);">${dateRangeStr}</span>
              <span class="badge ${coverageVal < 50 ? 'badge-strained' : 'badge-neutral'}" style="font-weight: 500; font-size: 0.75rem;">
-                Coverage: ${coverageVal}% (${currentPeriod})
+                Coverage: ${coverageVal}%
             </span>
         </div>
     `;
@@ -899,13 +982,15 @@ function renderKPIs(data) {
     `;
 
     // Footer
+    const repairHtml = getRepairBtnHtml();
     const footerHtml = `
         <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
             <span id="overviewUpdateTimestamp">Granularity applied: ${currentPeriod}</span>
         </div>
     `;
 
-    kpiGrid.innerHTML = coverageHtml + standardCards + recHtml + insightsHtml + footerHtml;
+    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + repairHtml + footerHtml;
+    bindRepairBtn();
 }
 
 function renderSleepTab(data) {
@@ -962,13 +1047,13 @@ function renderSleepTab(data) {
     }
 
     // Coverage
-    const cvg = calcCoverage(last);
+    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
 
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
                 <div class="kpi-title">${currentPeriod === 'daily' ? 'Sleep Duration' : 'Avg Sleep / Night'}</div>
-                 <div class="text-xs text-secondary">Cov: ${cvg}%</div>
+                 <div class="text-xs text-secondary">Data days: ${dayLabel}</div>
             </div>
             <div class="kpi-value">${currSleep ? (currSleep / 60).toFixed(1) : '--'} <span style="font-size:1rem;color:#666">hrs</span></div>
             <div class="kpi-meta">${trendHtml}</div>
@@ -1016,13 +1101,13 @@ function renderRecoveryTab(data) {
     }
 
     // Coverage
-    const cvg = calcCoverage(last);
+    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
 
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
                 <div class="kpi-title">Recovery Trend</div>
-                <div class="text-xs text-secondary">Cov: ${cvg}%</div>
+                <div class="text-xs text-secondary">Data days: ${dayLabel}</div>
             </div>
             <div style="margin-top:0.5rem"><span class="badge ${badgeClass}">${status}</span></div>
             <div class="text-sm" style="margin-top:0.5rem">${insight}</div>
@@ -1054,13 +1139,14 @@ function renderActivityTab(data) {
     const azm = safeNumber(last.azm) || 0;
 
     // Coverage
-    const cvg = calcCoverage(last);
+    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
+    const repairHtml = getRepairBtnHtml();
 
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
                  <div class="kpi-title">Steps</div>
-                 <div class="text-xs text-secondary">Cov: ${cvg}%</div>
+                 <div class="text-xs text-secondary">Data days: ${dayLabel}</div>
             </div>
             <div class="kpi-value">${(steps / 1000).toFixed(1)}k</div>
             <div class="text-sm">Period Total (${count}d)</div>
@@ -1078,7 +1164,11 @@ function renderActivityTab(data) {
             <div class="text-sm">Period Total (AZM)</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
         </div>
+        <div style="grid-column:1/-1">
+           ${repairHtml}
+        </div>
     `;
+    bindRepairBtn();
 }
 
 function renderExportTab(data) {
