@@ -498,6 +498,70 @@ function renderStreakSection(data) {
     `;
 }
 
+// Achievement System
+const ACHIEVEMENTS = [
+    { id: 'first_sync', emoji: '🎯', name: 'Getting Started', desc: 'First data sync', checkFn: (data) => data.series.length > 0 },
+    { id: 'week_warrior', emoji: '📅', name: 'Week Warrior', desc: '7+ days of data', checkFn: (data) => data.series.length >= 7 },
+    { id: 'month_master', emoji: '🗓️', name: 'Month Master', desc: '30+ days tracked', checkFn: (data) => data.series.length >= 30 },
+    { id: 'step_hero', emoji: '👟', name: 'Step Hero', desc: '10k+ steps in a day', checkFn: (data) => data.series.some(d => d.steps >= 10000) },
+    { id: 'marathon', emoji: '🏃', name: 'Marathon', desc: '20k+ steps in a day', checkFn: (data) => data.series.some(d => d.steps >= 20000) },
+    { id: 'sleep_champion', emoji: '😴', name: 'Sleep Champion', desc: '8+ hours sleep', checkFn: (data) => data.series.some(d => d.sleepMinutes >= 480) },
+    { id: 'early_bird', emoji: '🌅', name: 'Early Bird', desc: '3-day sleep streak', checkFn: (data) => calculateStreak(data, 'sleepMinutes', 420).longest >= 3 },
+    { id: 'consistency', emoji: '🔥', name: 'Consistency', desc: '7-day step streak', checkFn: (data) => calculateStreak(data, 'steps', 8000).longest >= 7 },
+    { id: 'active_lifestyle', emoji: '💪', name: 'Active Lifestyle', desc: '150+ AZM in a week', checkFn: (data) => data.series.some(d => d.azm >= 150) },
+    { id: 'recovery_pro', emoji: '❤️', name: 'Recovery Pro', desc: 'RHR below 60', checkFn: (data) => data.series.some(d => d.restingHr > 0 && d.restingHr < 60) },
+    { id: 'hrv_master', emoji: '📈', name: 'HRV Master', desc: 'HRV above 60ms', checkFn: (data) => data.series.some(d => d.hrvRmssd >= 60) },
+    { id: 'data_hoarder', emoji: '📊', name: 'Data Hoarder', desc: '60+ days tracked', checkFn: (data) => data.series.length >= 60 }
+];
+
+function checkAchievements(data) {
+    if (!data || !Array.isArray(data.series)) return [];
+
+    return ACHIEVEMENTS.map(achievement => {
+        const unlocked = achievement.checkFn(data);
+        return {
+            ...achievement,
+            unlocked,
+            unlockedDate: unlocked ? (data.series[data.series.length - 1]?.date || null) : null
+        };
+    });
+}
+
+function renderAchievementSection(data) {
+    if (!data || !Array.isArray(data.series) || data.series.length === 0) return '';
+
+    const achievements = checkAchievements(data);
+    const unlockedCount = achievements.filter(a => a.unlocked).length;
+    const totalCount = achievements.length;
+
+    const achievementCards = achievements.map(achievement => {
+        const lockedClass = achievement.unlocked ? 'unlocked' : 'locked';
+        const dateHtml = achievement.unlocked && achievement.unlockedDate
+            ? `<div class="achievement-date">Unlocked!</div>`
+            : '';
+
+        return `
+            <div class="achievement-card ${lockedClass}" title="${achievement.desc}">
+                <span class="achievement-emoji">${achievement.emoji}</span>
+                <div class="achievement-name">${achievement.name}</div>
+                ${dateHtml}
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div class="achievement-section">
+            <div class="achievement-section-title">
+                <span>🏅 Achievements</span>
+                <span class="achievement-progress">${unlockedCount}/${totalCount}</span>
+            </div>
+            <div class="achievement-grid">
+                ${achievementCards}
+            </div>
+        </div>
+    `;
+}
+
 // Theme Management
 function initTheme() {
     const savedTheme = localStorage.getItem('fitbit_theme') || 'light';
@@ -1754,13 +1818,14 @@ function renderKPIs(data) {
     const repairHtml = getRepairBtnHtml(repairState);
     const prSectionHtml = renderPRSection(data);
     const streakSectionHtml = renderStreakSection(data);
+    const achievementSectionHtml = renderAchievementSection(data);
     const footerHtml = `
         <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
             <span id="overviewUpdateTimestamp">Granularity applied: ${currentPeriod}</span>
         </div>
     `;
 
-    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + streakSectionHtml + repairHtml + footerHtml;
+    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + streakSectionHtml + achievementSectionHtml + repairHtml + footerHtml;
     bindRepairBtn();
 }
 
