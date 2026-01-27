@@ -373,7 +373,19 @@ async function handleBackfillStatus(req: Request, env: Env): Promise<Response> {
     const rawCronState = await env.FITBIT_KV.get("backfill:cron_state");
     const cronState = rawCronState ? JSON.parse(rawCronState) : null;
 
-    return jsonResponse(env, { ...state, cronState });
+    // Calculate earliest nextRetryAt from failedDays for visibility
+    let earliestRetryAt = null;
+    if (state.failedDays && state.failedDays.length > 0) {
+        const retryTimes = state.failedDays
+            .map((f: any) => f.nextRetryAt)
+            .filter((t: any) => t !== null)
+            .map((t: any) => new Date(t).getTime());
+        if (retryTimes.length > 0) {
+            earliestRetryAt = new Date(Math.min(...retryTimes)).toISOString();
+        }
+    }
+
+    return jsonResponse(env, { ...state, cronState, earliestRetryAt });
 }
 
 async function handleBackfillStop(req: Request, env: Env): Promise<Response> {
@@ -990,17 +1002,22 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
                 // Move to end of failedDays to give other failed days a chance, or if it's the only one, it stays.
                 failedDays.shift();
                 failedDays.push(oldestFailed);
-                await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Retry failed: ${errorMessage}`, true, 0, failedDays);
+
+                // For rate_limit: preserve chunk window state
+                if (errorType === "rate_limit") {
+                    await updateStateOnRateLimit(env, failedDays);
+                    console.log("Rate limited during retry, preserving chunk window, stopping retry attempts.");
+                    retriesAttemptedThisChunk++;
+                    break; // Exit retry loop, continue to new days
+                } else {
+                    await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Retry failed: ${errorMessage}`, true, 0, failedDays);
+                }
+
                 retriesAttemptedThisChunk++;
                 // If auth required, stop immediately
                 if (errorType === "auth_required") {
                     blockedByAuth = true;
                     return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: true };
-                }
-                // If rate limited, stop retry attempts but continue with new days
-                if (errorType === "rate_limit") {
-                    console.log("Rate limited during retry, stopping retry attempts, will process new days.");
-                    break; // Exit retry loop, continue to new days
                 }
             }
         } else {
@@ -1079,8 +1096,16 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
                 failedDays[existingFailedIdx].retryCount++;
                 failedDays[existingFailedIdx].retryCount++;
             }
-            // Update state after failure
-            await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Failed at ${dateStr}: ${errorMessage}`, true, 0, failedDays);
+
+            // For rate_limit: preserve chunk window state to prevent progress jumping
+            if (errorType === "rate_limit") {
+                await updateStateOnRateLimit(env, failedDays);
+                console.log(`[${attemptedNewDays}/${maxNewDaysPerTick}] Day ${dateStr} rate limited, preserving chunk window, continuing...`);
+            } else {
+                // Update state after failure for non-rate-limit errors
+                await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, dateStr, `Failed at ${dateStr}: ${errorMessage}`, true, 0, failedDays);
+                console.log(`[${attemptedNewDays}/${maxNewDaysPerTick}] Day ${dateStr} failed with ${errorType}, continuing...`);
+            }
 
             // If auth required, stop immediately (only blocker)
             if (errorType === "auth_required") {
@@ -1089,8 +1114,6 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
             }
 
             // For rate_limit and other errors: continue processing more days up to cap of 7
-            console.log(`[${attemptedNewDays}/${maxNewDaysPerTick}] Day ${dateStr} failed with ${errorType}, continuing...`);
-
             // Don't break - fall through to sleep and continue
         } else {
             // Success case
@@ -1110,8 +1133,22 @@ async function processBackfill(env: Env, fromDate: Date, toDate: Date, totalDays
     }
 
     // Update state one last time to reflect current progress and potentially mark as not running if done
-    // Fix: Set running = false, task is done
-    await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], null, false, 0, failedDays);
+    // If no progress was made (all rate_limited), state was already updated by updateStateOnRateLimit, don't overwrite
+    if (processedNewDays > 0 || processedRetriedDays > 0) {
+        await updateState(env, fromDate, toDate, processedNewDays, totalDays, startedAt, currentDate.toISOString().split('T')[0], null, false, 0, failedDays);
+    } else {
+        // No days processed, ensure running is set to false without changing chunk window
+        // State was already updated by updateStateOnRateLimit if rate_limit occurred
+        const rawState = await env.FITBIT_KV.get("backfill:progress");
+        if (rawState) {
+            const state = JSON.parse(rawState) as BackfillState;
+            if (state.running) {
+                state.running = false;
+                state.updatedAt = new Date().toISOString();
+                await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+            }
+        }
+    }
 
     return { newDays: processedNewDays, retriedDays: processedRetriedDays, blockedByAuth: blockedByAuth };
 }
@@ -1185,6 +1222,25 @@ async function updateState(env: Env, from: Date, to: Date, processed: number, to
         failedDays: failedDays.length > 0 ? failedDays : undefined
     };
     await env.FITBIT_KV.put("backfill:progress", JSON.stringify(state));
+}
+
+// Lightweight update that preserves chunk window state (from, to, processedDays, totalDays, lastProcessedDate)
+// Used when rate_limit occurs to avoid shifting the chunk window on retry
+async function updateStateOnRateLimit(env: Env, failedDays: Array<{ date: string, errorType: string, errorMessage: string, failedAt: string, nextRetryAt: string | null, retryCount: number }>) {
+    const rawState = await env.FITBIT_KV.get("backfill:progress");
+    if (!rawState) {
+        console.warn("updateStateOnRateLimit called but no existing state found");
+        return;
+    }
+    const existingState = JSON.parse(rawState) as BackfillState;
+
+    // Only update these fields, preserve chunk window
+    existingState.running = false;
+    existingState.updatedAt = new Date().toISOString();
+    existingState.lastError = null; // Clear error to allow retry
+    existingState.failedDays = failedDays.length > 0 ? failedDays : undefined;
+
+    await env.FITBIT_KV.put("backfill:progress", JSON.stringify(existingState));
 }
 
 // ... handleAuth ... handleCallback ... handleToday ...
