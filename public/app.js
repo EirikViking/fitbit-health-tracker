@@ -763,6 +763,30 @@ function renderBackfillCard(data) {
 
         $('bf-updated-at').textContent = fmtLocalWithAge(lastUpdatedAt || progress?.updatedAt);
 
+        // Cron State Display
+        const cronState = data.cronState;
+        let cronEl = document.getElementById('bf-cron-status');
+        if (!cronEl) {
+            cronEl = document.createElement('div');
+            cronEl.id = 'bf-cron-status';
+            cronEl.style.fontSize = '0.75rem';
+            cronEl.style.color = 'var(--text-secondary)';
+            cronEl.style.marginTop = '0.5rem';
+            cronEl.style.padding = '0.5rem';
+            cronEl.style.background = 'rgba(0,0,0,0.02)';
+            cronEl.style.borderRadius = '4px';
+            $('bf-updated-at').parentElement.appendChild(cronEl);
+        }
+
+        if (cronState) {
+            const lastResult = cronState.lastTickResult || 'unknown';
+            const lastAttempt = cronState.lastTickAttemptAt ? fmtAge(cronState.lastTickAttemptAt) : 'never';
+            const nextRetry = cronState.nextRetryAllowedAt ? `next retry ${fmtLocalWithAge(cronState.nextRetryAllowedAt)}` : '';
+            cronEl.textContent = `Automation: ${lastResult}, last attempt ${lastAttempt}${nextRetry ? ', ' + nextRetry : ''}`;
+        } else {
+            cronEl.textContent = 'Automation: initializing';
+        }
+
         // Progress Bar
         if (progress && progress.totalDays > 0) {
             const pct = Math.min(100, Math.round((progress.processedDays / progress.totalDays) * 100));

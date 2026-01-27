@@ -295,6 +295,13 @@ interface RepairState {
     repairedCount: number;
 }
 
+interface BackfillCronState {
+    lastCronTickAt: string | null;
+    lastTickAttemptAt: string | null;
+    lastTickResult: 'ok' | 'rate_limit' | 'auth_required' | 'noop' | null;
+    nextRetryAllowedAt: string | null;
+}
+
 async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
@@ -362,7 +369,11 @@ async function handleBackfill(req: Request, env: Env, ctx: ExecutionContext): Pr
 async function handleBackfillStatus(req: Request, env: Env): Promise<Response> {
     const rawState = await env.FITBIT_KV.get("backfill:progress");
     const state = rawState ? JSON.parse(rawState) : { running: false };
-    return jsonResponse(env, state);
+
+    const rawCronState = await env.FITBIT_KV.get("backfill:cron_state");
+    const cronState = rawCronState ? JSON.parse(rawCronState) : null;
+
+    return jsonResponse(env, { ...state, cronState });
 }
 
 async function handleBackfillStop(req: Request, env: Env): Promise<Response> {
@@ -1919,16 +1930,40 @@ async function updateCronStats(env: Env, success: boolean, duration: number, det
 // --- Automated Backfill Helper ---
 
 async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: number, retriedDays: number, blockedByAuth: boolean }> {
+    const now = Date.now();
+    const nowISO = new Date(now).toISOString();
+
+    // Load cron state
+    const rawCronState = await env.FITBIT_KV.get("backfill:cron_state");
+    let cronState: BackfillCronState = rawCronState ? JSON.parse(rawCronState) : {
+        lastCronTickAt: null,
+        lastTickAttemptAt: null,
+        lastTickResult: null,
+        nextRetryAllowedAt: null
+    };
+
+    // Update last cron tick time
+    cronState.lastCronTickAt = nowISO;
+
     const rawPlan = await env.FITBIT_KV.get("backfill:plan");
-    if (!rawPlan) return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    if (!rawPlan) {
+        cronState.lastTickResult = 'noop';
+        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    }
 
     const plan = JSON.parse(rawPlan) as BackfillPlan;
-    if (!plan.active) return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    if (!plan.active) {
+        cronState.lastTickResult = 'noop';
+        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    }
 
     // Check for auth_required before starting any sync
     const authRequired = await env.FITBIT_KV.get("auth:required");
-    // If auth is strictly required and we know it, fail fast
     if (authRequired === "true") {
+        cronState.lastTickResult = 'auth_required';
+        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
         return { newDays: 0, retriedDays: 0, blockedByAuth: true };
     }
 
@@ -1936,16 +1971,77 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
     const rawProgress = await env.FITBIT_KV.get("backfill:progress");
     const progress = rawProgress ? JSON.parse(rawProgress) as BackfillState : null;
 
+    // Check if already running
+    if (progress?.running) {
+        cronState.lastTickResult = 'noop';
+        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    }
+
+    // Decide if we should tick
+    let shouldTick = false;
+    let tickReason = '';
+
+    // Check if there's work to do
+    if (progress) {
+        // Check if more days to process
+        if (progress.processedDays < progress.totalDays) {
+            shouldTick = true;
+            tickReason = 'more days to process';
+        }
+
+        // Check if failed days are due for retry
+        if (progress.failedDays && progress.failedDays.length > 0) {
+            const dueRetries = progress.failedDays.filter(f => {
+                if (!f.nextRetryAt) return true;
+                return new Date(f.nextRetryAt).getTime() <= now;
+            });
+            if (dueRetries.length > 0) {
+                shouldTick = true;
+                tickReason = tickReason ? `${tickReason}, failed days due` : 'failed days due for retry';
+            }
+        }
+    } else {
+        // No progress yet, should start
+        shouldTick = true;
+        tickReason = 'no progress yet';
+    }
+
+    if (!shouldTick) {
+        cronState.lastTickResult = 'noop';
+        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+        return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+    }
+
+    // Check rate limiting
+    if (cronState.nextRetryAllowedAt) {
+        const nextRetryTime = new Date(cronState.nextRetryAllowedAt).getTime();
+        if (now < nextRetryTime) {
+            cronState.lastTickResult = 'noop';
+            await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+            console.log(`[Backfill] Rate limited, next retry at ${cronState.nextRetryAllowedAt}`);
+            return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+        }
+    }
+
+    // Check minimum interval between attempts (120s)
+    if (cronState.lastTickAttemptAt) {
+        const timeSinceLastAttempt = now - new Date(cronState.lastTickAttemptAt).getTime();
+        if (timeSinceLastAttempt < 120000) {
+            cronState.lastTickResult = 'noop';
+            await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
+            return { newDays: 0, retriedDays: 0, blockedByAuth: false };
+        }
+    }
+
+    console.log(`[Backfill] Starting tick: ${tickReason}`);
+    cronState.lastTickAttemptAt = nowISO;
+
     // Check if progress has "Auth required" error BUT authRequired is false
     // Meaning we recovered, so we should clear the error and proceed
     if (progress?.lastError === "Auth required") {
         console.log("[Backfill] Clearing stale 'Auth required' error as auth is restored.");
         progress.lastError = null;
-        // We must persist this clearance, but we can do it by just letting flow continue
-        // and updateState will override it eventually, OR we update KV now.
-        // It's safer to just modify in memory for this function's scope, 
-        // and let the final updateState save it. 
-        // BUT updateState is called deeper. Let's rely on that.
     }
 
     let toDate: Date;
@@ -2002,6 +2098,30 @@ async function processAutomatedBackfillChunk(env: Env): Promise<{ newDays: numbe
         plan.updatedAt = new Date().toISOString();
         await env.FITBIT_KV.put("backfill:plan", JSON.stringify(plan));
 
+        // Update cron state based on result
+        if (res.blockedByAuth) {
+            cronState.lastTickResult = 'auth_required';
+        } else if (res.newDays === 0 && res.retriedDays === 0) {
+            cronState.lastTickResult = 'rate_limit';
+            // Find earliest nextRetryAt from failed days
+            const rawEndProgress = await env.FITBIT_KV.get("backfill:progress");
+            if (rawEndProgress) {
+                const endProgress = JSON.parse(rawEndProgress) as BackfillState;
+                if (endProgress.failedDays && endProgress.failedDays.length > 0) {
+                    const earliestRetry = endProgress.failedDays
+                        .map(f => f.nextRetryAt ? new Date(f.nextRetryAt).getTime() : Infinity)
+                        .reduce((min, t) => Math.min(min, t), Infinity);
+                    if (earliestRetry !== Infinity) {
+                        cronState.nextRetryAllowedAt = new Date(earliestRetry).toISOString();
+                    }
+                }
+            }
+        } else {
+            cronState.lastTickResult = 'ok';
+            cronState.nextRetryAllowedAt = null;
+        }
+
+        await env.FITBIT_KV.put("backfill:cron_state", JSON.stringify(cronState));
         return res;
     } finally {
         // Safety Clean-up: Always ensure running is false when this chunk logic finishes
