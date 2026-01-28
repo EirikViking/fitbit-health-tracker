@@ -14,4 +14,4 @@ directory = "./public"
 binding = "ASSETS"
 
 [vars]
-DEBUG_SLEEP = "1"
+# DEBUG_SLEEP = "1"  # Uncomment to enable debug logging for sleep calculations

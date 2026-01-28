@@ -152,8 +152,6 @@ export default {
             if (url.pathname === "/api/sync") return handleSyncTrigger(request, env);
             if (url.pathname === "/api/history") return handleHistory(request, env);
             if (url.pathname === "/api/day") return handleDay(request, env);
-            if (url.pathname === "/api/debug/sleep") return handleDebugSleep(request, env);
-            if (url.pathname === "/api/debug/goals") return handleDebugGoals(request, env);
 
             // Phase 2E: Backfill & Cron
             if (url.pathname === "/api/backfill") return handleBackfill(request, env, ctx);
@@ -2033,113 +2031,6 @@ async function handleDay(req: Request, env: Env): Promise<Response> {
         metrics: sanitized
     });
 }
-
-async function handleDebugSleep(req: Request, env: Env): Promise<Response> {
-    const url = new URL(req.url);
-    const date = url.searchParams.get("date");
-    const mode = url.searchParams.get("mode") || "date"; // "date" or "list"
-
-    if (!date) return new Response("Missing date", { status: 400 });
-
-    // Fetch sleep data from Fitbit - try both endpoints
-    let sleepRes;
-    if (mode === "list") {
-        // List endpoint returns recent sleep logs sorted by date
-        sleepRes = await fetchFitbitJSON(env, `/sleep/list.json?beforeDate=${date}&sort=desc&limit=10&offset=0`);
-    } else {
-        sleepRes = await fetchFitbitJSON(env, `/sleep/date/${date}.json`);
-    }
-
-    if (!sleepRes.ok) {
-        return jsonResponse(env, {
-            error: "Failed to fetch sleep data",
-            status: sleepRes.status
-        });
-    }
-
-    const rawLogs = sleepRes.data?.sleep || [];
-    const rawEntries: any[] = [];
-
-    // Collect complete raw entry info
-    rawLogs.forEach((l: any) => {
-        rawEntries.push(l);
-    });
-
-    // Apply inclusion logic
-    const sessionKeys = new Set<string>();
-    const includedEntries: any[] = [];
-
-    for (const log of rawLogs) {
-        let include = false;
-        let reason = "";
-
-        if (log.endTime) {
-            const endDate = log.endTime.split('T')[0];
-            if (endDate === date) {
-                include = true;
-                reason = `endTime_date=${endDate}`;
-            } else {
-                reason = `endTime_date=${endDate}_not_match`;
-            }
-        } else if (log.dateOfSleep === date) {
-            include = true;
-            reason = `fallback_dateOfSleep=${log.dateOfSleep}`;
-        } else {
-            reason = `no_match`;
-        }
-
-        if (include) {
-            const sessionKey = `${log.startTime || 'unknown'}_${log.endTime || 'unknown'}`;
-            if (!sessionKeys.has(sessionKey)) {
-                sessionKeys.add(sessionKey);
-                includedEntries.push({
-                    logId: log.logId,
-                    isMainSleep: log.isMainSleep,
-                    minutesAsleep: log.minutesAsleep,
-                    dateOfSleep: log.dateOfSleep,
-                    startTime: log.startTime,
-                    endTime: log.endTime,
-                    sessionKey,
-                    reason
-                });
-            } else {
-                // Duplicate session key
-            }
-        }
-    }
-
-    const totalMinutes = includedEntries.reduce((sum, e) => sum + (Number(e.minutesAsleep) || 0), 0);
-    const mainCount = includedEntries.filter(e => e.isMainSleep).length;
-
-    return jsonResponse(env, {
-        targetDate: date,
-        rawCount: rawEntries.length,
-        rawEntries,
-        includedCount: includedEntries.length,
-        includedEntries,
-        totalMinutes,
-        mainCount,
-        summary: sleepRes.data?.summary
-    });
-}
-
-async function handleDebugGoals(req: Request, env: Env): Promise<Response> {
-    // Try to fetch sleep goals from various endpoints
-    const results: any = {};
-
-    // Try sleep goals endpoint
-    const sleepGoalRes = await fetchFitbitJSON(env, `/sleep/goal.json`);
-    results.sleepGoal = { status: sleepGoalRes.status, data: sleepGoalRes.data };
-
-    // Try user profile which might have goals
-    const profileRes = await fetchFitbitJSON(env, `/profile.json`);
-    results.profile = { status: profileRes.status, data: profileRes.data };
-
-    return jsonResponse(env, results);
-}
-
-
-
 
 
 // --- Shared Helpers ---
