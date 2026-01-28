@@ -152,6 +152,7 @@ export default {
             if (url.pathname === "/api/sync") return handleSyncTrigger(request, env);
             if (url.pathname === "/api/history") return handleHistory(request, env);
             if (url.pathname === "/api/day") return handleDay(request, env);
+            if (url.pathname === "/api/debug/sleep") return handleDebugSleep(request, env);
 
             // Phase 2E: Backfill & Cron
             if (url.pathname === "/api/backfill") return handleBackfill(request, env, ctx);
@@ -2029,6 +2030,98 @@ async function handleDay(req: Request, env: Env): Promise<Response> {
     return jsonResponse(env, {
         date,
         metrics: sanitized
+    });
+}
+
+async function handleDebugSleep(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+    const date = url.searchParams.get("date");
+    if (!date) return new Response("Missing date", { status: 400 });
+
+    // Fetch sleep data from Fitbit
+    const sleepRes = await fetchFitbitJSON(env, `/sleep/date/${date}.json`);
+
+    if (!sleepRes.ok) {
+        return jsonResponse(env, {
+            error: "Failed to fetch sleep data",
+            status: sleepRes.status
+        });
+    }
+
+    const rawLogs = sleepRes.data?.sleep || [];
+    const rawEntries: any[] = [];
+
+    // Collect raw entry info
+    rawLogs.forEach((l: any) => {
+        const info: any = {
+            logId: l.logId,
+            isMainSleep: l.isMainSleep,
+            minutesAsleep: l.minutesAsleep,
+            dateOfSleep: l.dateOfSleep,
+            startTime: l.startTime,
+            endTime: l.endTime
+        };
+        if (l.type) info.type = l.type;
+        if (l.sleepType) info.sleepType = l.sleepType;
+        if (l.infoCode) info.infoCode = l.infoCode;
+        rawEntries.push(info);
+    });
+
+    // Apply inclusion logic
+    const sessionKeys = new Set<string>();
+    const includedEntries: any[] = [];
+
+    for (const log of rawLogs) {
+        let include = false;
+        let reason = "";
+
+        if (log.endTime) {
+            const endDate = log.endTime.split('T')[0];
+            if (endDate === date) {
+                include = true;
+                reason = `endTime_date=${endDate}`;
+            } else {
+                reason = `endTime_date=${endDate}_not_match`;
+            }
+        } else if (log.dateOfSleep === date) {
+            include = true;
+            reason = `fallback_dateOfSleep=${log.dateOfSleep}`;
+        } else {
+            reason = `no_match`;
+        }
+
+        if (include) {
+            const sessionKey = `${log.startTime || 'unknown'}_${log.endTime || 'unknown'}`;
+            if (!sessionKeys.has(sessionKey)) {
+                sessionKeys.add(sessionKey);
+                includedEntries.push({
+                    logId: log.logId,
+                    isMainSleep: log.isMainSleep,
+                    minutesAsleep: log.minutesAsleep,
+                    dateOfSleep: log.dateOfSleep,
+                    startTime: log.startTime,
+                    endTime: log.endTime,
+                    sessionKey,
+                    reason
+                });
+            } else {
+                // Duplicate session key
+            }
+        }
+    }
+
+    const totalMinutes = includedEntries.reduce((sum, e) => sum + (Number(e.minutesAsleep) || 0), 0);
+    const mainCount = includedEntries.filter(e => e.isMainSleep).length;
+
+    return jsonResponse(env, {
+        targetDate: date,
+        rawCount: rawEntries.length,
+        rawEntries,
+        includedCount: includedEntries.length,
+        includedEntries,
+        totalMinutes,
+        mainCount,
+        summary: sleepRes.data?.summary
     });
 }
 
