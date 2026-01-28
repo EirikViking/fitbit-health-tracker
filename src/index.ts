@@ -153,6 +153,7 @@ export default {
             if (url.pathname === "/api/history") return handleHistory(request, env);
             if (url.pathname === "/api/day") return handleDay(request, env);
             if (url.pathname === "/api/debug/sleep") return handleDebugSleep(request, env);
+            if (url.pathname === "/api/debug/goals") return handleDebugGoals(request, env);
 
             // Phase 2E: Backfill & Cron
             if (url.pathname === "/api/backfill") return handleBackfill(request, env, ctx);
@@ -2120,6 +2121,21 @@ async function handleDebugSleep(req: Request, env: Env): Promise<Response> {
         mainCount,
         summary: sleepRes.data?.summary
     });
+}
+
+async function handleDebugGoals(req: Request, env: Env): Promise<Response> {
+    // Try to fetch sleep goals from various endpoints
+    const results: any = {};
+
+    // Try sleep goals endpoint
+    const sleepGoalRes = await fetchFitbitJSON(env, `/sleep/goal.json`);
+    results.sleepGoal = { status: sleepGoalRes.status, data: sleepGoalRes.data };
+
+    // Try user profile which might have goals
+    const profileRes = await fetchFitbitJSON(env, `/profile.json`);
+    results.profile = { status: profileRes.status, data: profileRes.data };
+
+    return jsonResponse(env, results);
 }
 
 
