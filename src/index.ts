@@ -2051,20 +2051,9 @@ async function handleDebugSleep(req: Request, env: Env): Promise<Response> {
     const rawLogs = sleepRes.data?.sleep || [];
     const rawEntries: any[] = [];
 
-    // Collect raw entry info
+    // Collect complete raw entry info
     rawLogs.forEach((l: any) => {
-        const info: any = {
-            logId: l.logId,
-            isMainSleep: l.isMainSleep,
-            minutesAsleep: l.minutesAsleep,
-            dateOfSleep: l.dateOfSleep,
-            startTime: l.startTime,
-            endTime: l.endTime
-        };
-        if (l.type) info.type = l.type;
-        if (l.sleepType) info.sleepType = l.sleepType;
-        if (l.infoCode) info.infoCode = l.infoCode;
-        rawEntries.push(info);
+        rawEntries.push(l);
     });
 
     // Apply inclusion logic
