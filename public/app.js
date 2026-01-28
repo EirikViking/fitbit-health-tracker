@@ -1842,19 +1842,56 @@ function renderSleepTab(data) {
     const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) return;
 
-    const last = rows[rows.length - 1];
-    const prev = rows.length > 1 ? rows[rows.length - 2] : null;
+    // Calculate average sleep and data days
+    let currSleep = null;
+    let sleepDays = 0;
 
-    // 1. Avg Sleep
-    const currSleep = safeNumber(last.sleepMinutes);
-    const prevSleep = prev ? safeNumber(prev.sleepMinutes) : null;
+    if (currentPeriod === 'daily') {
+        // For daily view, calculate average across the period
+        let totalSleep = 0;
+        rows.forEach(row => {
+            const s = safeNumber(row.sleepMinutes);
+            if (s !== null && s > 0) {
+                totalSleep += s;
+                sleepDays++;
+            }
+        });
+        currSleep = sleepDays > 0 ? totalSleep / sleepDays : null;
+    } else {
+        // For weekly/monthly, use the aggregated value
+        const last = rows[rows.length - 1];
+        currSleep = safeNumber(last.sleepMinutes);
+        sleepDays = last.days || 1;
+    }
 
+    // Trend (compare current period avg with previous period avg)
     let trendHtml = '<span class="text-xs">No trend data</span>';
-    if (currSleep !== null && prevSleep !== null) {
-        const diff = currSleep - prevSleep;
-        const symbol = diff > 0 ? '↑' : (diff < 0 ? '↓' : '→');
-        const color = diff > 0 ? 'trend-up' : 'trend-down';
-        trendHtml = `<span class="${color}">${symbol} ${Math.abs(diff / 60).toFixed(1)}h vs prev</span>`;
+    if (currentPeriod === 'daily' && rows.length >= 2) {
+        // Calculate previous half of the period for comparison
+        const midpoint = Math.floor(rows.length / 2);
+        const currentHalf = rows.slice(midpoint);
+        const previousHalf = rows.slice(0, midpoint);
+
+        const currAvg = currentHalf.reduce((sum, r) => sum + (safeNumber(r.sleepMinutes) || 0), 0) / Math.max(currentHalf.length, 1);
+        const prevAvg = previousHalf.reduce((sum, r) => sum + (safeNumber(r.sleepMinutes) || 0), 0) / Math.max(previousHalf.length, 1);
+
+        if (currAvg > 0 && prevAvg > 0) {
+            const diff = currAvg - prevAvg;
+            const symbol = diff > 0 ? '↑' : (diff < 0 ? '↓' : '→');
+            const color = diff > 0 ? 'trend-up' : 'trend-down';
+            trendHtml = `<span class="${color}">${symbol} ${Math.abs(diff / 60).toFixed(1)}h vs prev half</span>`;
+        }
+    } else if (currentPeriod !== 'daily' && rows.length > 1) {
+        const last = rows[rows.length - 1];
+        const prev = rows[rows.length - 2];
+        const currS = safeNumber(last.sleepMinutes);
+        const prevS = safeNumber(prev.sleepMinutes);
+        if (currS !== null && prevS !== null) {
+            const diff = currS - prevS;
+            const symbol = diff > 0 ? '↑' : (diff < 0 ? '↓' : '→');
+            const color = diff > 0 ? 'trend-up' : 'trend-down';
+            trendHtml = `<span class="${color}">${symbol} ${Math.abs(diff / 60).toFixed(1)}h vs prev</span>`;
+        }
     }
 
     // 2. Consistency
@@ -1890,7 +1927,7 @@ function renderSleepTab(data) {
     }
 
     // Coverage
-    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
+    const dayLabel = currentPeriod === 'daily' ? `${sleepDays}d` : `${rows[rows.length - 1].days || 0} of ${rows[rows.length - 1].expectedDays || 1}`;
 
     // Find best/worst sleep days (only for daily view)
     let highlightsHtml = '';
@@ -1914,7 +1951,7 @@ function renderSleepTab(data) {
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
-                <div class="kpi-title">${currentPeriod === 'daily' ? 'Sleep Duration' : 'Avg Sleep / Night'}</div>
+                <div class="kpi-title">Avg Sleep / Night</div>
                  <div class="text-xs text-secondary">Data days: ${dayLabel}</div>
             </div>
             <div class="kpi-value">${currSleep ? (currSleep / 60).toFixed(1) : '--'} <span style="font-size:1rem;color:#666">hrs</span></div>
@@ -1942,13 +1979,57 @@ function renderRecoveryTab(data) {
     const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) return;
 
-    const last = rows[rows.length - 1];
-    const prev = rows.length > 1 ? rows[rows.length - 2] : null;
+    // Calculate average RHR and HRV across the period
+    let rhrCurr = null;
+    let hrvCurr = null;
+    let rhrDays = 0;
+    let hrvDays = 0;
 
-    const rhrCurr = safeNumber(last.restingHr);
-    const rhrPrev = prev ? safeNumber(prev.restingHr) : null;
-    const hrvCurr = safeNumber(last.hrv);
-    const hrvPrev = prev ? safeNumber(prev.hrv) : null;
+    if (currentPeriod === 'daily') {
+        // For daily view, calculate average across all days
+        let totalRhr = 0;
+        let totalHrv = 0;
+        rows.forEach(row => {
+            const rhr = safeNumber(row.restingHr);
+            const hrv = safeNumber(row.hrv);
+            if (rhr !== null && rhr > 0) { totalRhr += rhr; rhrDays++; }
+            if (hrv !== null && hrv > 0) { totalHrv += hrv; hrvDays++; }
+        });
+        rhrCurr = rhrDays > 0 ? totalRhr / rhrDays : null;
+        hrvCurr = hrvDays > 0 ? totalHrv / hrvDays : null;
+    } else {
+        // For weekly/monthly, use aggregated values
+        const last = rows[rows.length - 1];
+        rhrCurr = safeNumber(last.restingHr);
+        hrvCurr = safeNumber(last.hrv);
+        rhrDays = last.days || 1;
+        hrvDays = last.days || 1;
+    }
+
+    // Calculate previous period averages for comparison
+    let rhrPrev = null;
+    let hrvPrev = null;
+
+    if (currentPeriod === 'daily' && rows.length >= 2) {
+        const midpoint = Math.floor(rows.length / 2);
+        const previousHalf = rows.slice(0, midpoint);
+
+        let prevRhrSum = 0, prevRhrCount = 0;
+        let prevHrvSum = 0, prevHrvCount = 0;
+        previousHalf.forEach(row => {
+            const rhr = safeNumber(row.restingHr);
+            const hrv = safeNumber(row.hrv);
+            if (rhr !== null && rhr > 0) { prevRhrSum += rhr; prevRhrCount++; }
+            if (hrv !== null && hrv > 0) { prevHrvSum += hrv; prevHrvCount++; }
+        });
+
+        rhrPrev = prevRhrCount > 0 ? prevRhrSum / prevRhrCount : null;
+        hrvPrev = prevHrvCount > 0 ? prevHrvSum / prevHrvCount : null;
+    } else if (currentPeriod !== 'daily' && rows.length > 1) {
+        const prev = rows[rows.length - 2];
+        rhrPrev = safeNumber(prev.restingHr);
+        hrvPrev = safeNumber(prev.hrv);
+    }
 
     let status = 'Neutral';
     let badgeClass = 'badge-neutral';
@@ -1967,7 +2048,7 @@ function renderRecoveryTab(data) {
     }
 
     // Coverage
-    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
+    const dayLabel = currentPeriod === 'daily' ? `${Math.max(rhrDays, hrvDays)}d` : `${rows[rows.length - 1].days || 0} of ${rows[rows.length - 1].expectedDays || 1}`;
 
     // Find best/worst days for RHR and HRV (only for daily view)
     let highlightsHtml = '';
@@ -2024,15 +2105,39 @@ function renderActivityTab(data) {
     const rows = normalizeForPeriod(data, currentPeriod) || [];
     if (rows.length === 0) return;
 
-    const last = rows[rows.length - 1];
+    // Aggregate metrics across all rows in the period
+    let steps = 0;
+    let cals = 0;
+    let azm = 0;
+    let stepsDays = 0;
+    let calsDays = 0;
+    let azmDays = 0;
 
-    const count = last.days || 1;
-    const steps = safeNumber(last.steps) || 0;
-    const cals = safeNumber(last.caloriesOut) || 0;
-    const azm = safeNumber(last.azm) || 0;
+    if (currentPeriod === 'daily') {
+        // For daily view, sum across all days in the range
+        rows.forEach(row => {
+            const s = safeNumber(row.steps);
+            const c = safeNumber(row.caloriesOut);
+            const a = safeNumber(row.azm);
+            if (s !== null && s > 0) { steps += s; stepsDays++; }
+            if (c !== null && c > 0) { cals += c; calsDays++; }
+            if (a !== null && a >= 0) { azm += a; azmDays++; } // AZM can be 0
+        });
+    } else {
+        // For weekly/monthly, use the aggregated values from last period
+        const last = rows[rows.length - 1];
+        steps = safeNumber(last.steps) || 0;
+        cals = safeNumber(last.caloriesOut) || 0;
+        azm = safeNumber(last.azm) || 0;
+        stepsDays = last.days || 1;
+        calsDays = last.days || 1;
+        azmDays = last.days || 1;
+    }
 
-    // Coverage
-    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
+    const count = currentPeriod === 'daily' ? Math.max(stepsDays, calsDays, azmDays) : (rows[rows.length - 1].days || 1);
+
+    // Coverage label
+    const dayLabel = currentPeriod === 'daily' ? `${stepsDays}d` : `${rows[rows.length - 1].days || 0} of ${rows[rows.length - 1].expectedDays || 1}`;
     const repairHtml = getRepairBtnHtml(repairState);
 
     // Find best/worst activity days (only for daily view)
