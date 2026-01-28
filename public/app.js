@@ -1475,7 +1475,13 @@ function renderBackfillCard(data) {
         $('bf-target-since').textContent = plan?.targetSince || "--";
         $('bf-from').textContent = progress?.from || "--";
         $('bf-to').textContent = progress?.to || "--";
-        $('bf-last-date').textContent = progress?.lastProcessedDate || "--";
+
+        // Last Date - show DONE if complete, otherwise show actual date
+        const lastDate = (done || status === "Complete") && progress?.lastProcessedDate === progress?.to
+            ? "DONE"
+            : (progress?.lastProcessedDate || "--");
+        $('bf-last-date').textContent = lastDate;
+
         $('bf-processed').textContent = progress?.processedDays ?? 0;
         $('bf-total').textContent = progress?.totalDays ?? 0;
         $('bf-remaining').textContent = estimatedRemainingDays ?? "--";
@@ -1502,6 +1508,8 @@ function renderBackfillCard(data) {
             const lastAttempt = cronState.lastTickAttemptAt ? fmtAge(cronState.lastTickAttemptAt) : 'never';
             const nextRetry = cronState.nextRetryAllowedAt ? `next retry ${fmtLocalWithAge(cronState.nextRetryAllowedAt)}` : '';
             cronEl.textContent = `Automation: ${lastResult}, last attempt ${lastAttempt}${nextRetry ? ', ' + nextRetry : ''}`;
+        } else if (done || status === "Complete") {
+            cronEl.textContent = 'Automation: ready (backfill complete)';
         } else {
             cronEl.textContent = 'Automation: initializing';
         }
