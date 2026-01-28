@@ -2,10 +2,6 @@ name = "fitbit-health-tracker"
 main = "src/index.ts"
 compatibility_date = "2026-01-26"
 
-kv_namespaces = [
-  { binding = "FITBIT_KV", id = "11196e8b1df14397914bdb09d9123bde", preview_id = "0076001f08cb4fd091ef41d559e67289" }
-]
-
 d1_databases = [
   { binding = "FITBIT_DB", database_name = "fitbit_health", database_id = "a4762736-497d-4bc9-96c0-b22cf25ecf36" }
 ]
@@ -17,3 +13,5 @@ crons = ["15 1 * * *", "*/2 * * * *"]
 directory = "./public"
 binding = "ASSETS"
 
+[vars]
+# DEBUG_SLEEP = "1"  # Uncomment to enable debug logging for sleep calculations

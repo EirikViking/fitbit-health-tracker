@@ -1,7 +1,7 @@
 
 export interface Env {
-    FITBIT_KV: KVNamespace;
     FITBIT_DB: D1Database;
+    ASSETS: Fetcher;
     FITBIT_CLIENT_ID: string;
     FITBIT_CLIENT_SECRET: string;
     FITBIT_REDIRECT_URL: string;
@@ -140,6 +140,7 @@ export default {
             if (url.pathname === "/api/activity/today") return handleActivityToday(request, env);
             if (url.pathname === "/api/activity/timeseries") return handleActivityTimeSeries(request, env);
             if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
+            if (url.pathname === "/api/catalog") return handleCatalog(request, env);
 
             // Repair
             if (url.pathname === "/api/repair/recent") return handleRepairRecent(request, env);
@@ -163,6 +164,11 @@ export default {
             if (url.pathname === "/api/backfill/plan/failed/skip") return handleBackfillFailedSkip(request, env);
             if (url.pathname === "/api/cron/status") return handleCronStatus(request, env);
             if (url.pathname === "/api/dev/cron/tick") return handleDevCronTick(request, env);
+
+            if (request.method === "GET" && (url.pathname === "/catalog" || url.pathname === "/catalog/")) {
+                const assetUrl = new URL("/catalog.html", url);
+                return env.ASSETS.fetch(new Request(assetUrl, request));
+            }
 
             return new Response("Not Found", { status: 404 });
         } catch (e: any) {
@@ -208,7 +214,7 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
                 await syncDay(env, yesterday);
             }
 
-            await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
+            await setState(env, "cron:last_sync", {
                 lastRunAt: new Date().toISOString(),
                 lastSyncDate: today,
                 success: true,
@@ -216,7 +222,7 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
                 synced_dates: [today, yesterday],
                 triggeredAt: meta.triggeredAt,
                 trigger: meta.trigger
-            }));
+            });
 
             // C) Process backfill chunk
             bfStats = await processAutomatedBackfillChunk(env);
@@ -231,7 +237,7 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
             if (e.stack) console.error(`[CRON] Stack: ${String(e.stack)}`);
 
             try {
-                await env.FITBIT_KV.put("cron:last_sync", JSON.stringify({
+                await setState(env, "cron:last_sync", {
                     lastRunAt: new Date().toISOString(),
                     lastSyncDate: null,
                     success: false,
@@ -239,9 +245,9 @@ async function runCronWork(env: Env, meta: { trigger: string, schedule: string, 
                     error: error,
                     triggeredAt: meta.triggeredAt,
                     trigger: meta.trigger
-                }));
-            } catch (kvError: any) {
-                console.error(`[CRON] Failed to log error to KV: ${String(kvError.message)}`);
+                });
+            } catch (stateError: any) {
+                console.error(`[CRON] Failed to log error to D1: ${String(stateError.message)}`);
             }
         }
 
@@ -439,25 +445,50 @@ async function setState<T>(env: Env, key: string, obj: T): Promise<void> {
     await d1SetRaw(env, key, newValueString);
 }
 
-// Safe migration: fallback to KV on first read, then migrate to D1
-async function getStateMigrating<T>(env: Env, key: string): Promise<T | null> {
-    // Try D1 first
-    const d1State = await getState<T>(env, key);
-    if (d1State !== null) return d1State;
+async function deleteState(env: Env, key: string): Promise<void> {
+    await env.FITBIT_DB.prepare("DELETE FROM automation_state WHERE key = ?").bind(key).run();
+}
 
-    // Fallback to KV if not in D1
-    const kvRaw = await env.FITBIT_KV.get(key);
-    if (!kvRaw) return null;
+async function deleteStateByPrefix(env: Env, prefix: string): Promise<void> {
+    await env.FITBIT_DB.prepare("DELETE FROM automation_state WHERE key LIKE ?").bind(`${prefix}%`).run();
+}
 
-    // Migrate from KV to D1
-    try {
-        const kvState = JSON.parse(kvRaw) as T;
-        await setState(env, key, kvState);
-        console.log(`[Migration] Migrated ${key} from KV to D1`);
-        return kvState;
-    } catch {
+interface ExpiringState<T> {
+    value: T;
+    expiresAt: string;
+}
+
+async function getExpiringState<T>(env: Env, key: string): Promise<T | null> {
+    const entry = await getState<ExpiringState<T>>(env, key);
+    if (!entry) return null;
+    if (new Date(entry.expiresAt).getTime() <= Date.now()) {
+        await deleteState(env, key);
         return null;
     }
+    return entry.value;
+}
+
+async function consumeExpiringState<T>(env: Env, key: string): Promise<T | null> {
+    const entry = await getState<ExpiringState<T>>(env, key);
+    if (!entry) return null;
+    if (new Date(entry.expiresAt).getTime() <= Date.now()) {
+        await deleteState(env, key);
+        return null;
+    }
+    await deleteState(env, key);
+    return entry.value;
+}
+
+async function setExpiringState<T>(env: Env, key: string, value: T, ttlMs: number): Promise<void> {
+    await setState(env, key, {
+        value,
+        expiresAt: new Date(Date.now() + ttlMs).toISOString()
+    });
+}
+
+// D1-only state (KV disabled)
+async function getStateMigrating<T>(env: Env, key: string): Promise<T | null> {
+    return getState<T>(env, key);
 }
 
 async function handleBackfillPlanStart(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -573,11 +604,8 @@ async function handleBackfillFailedSkip(req: Request, env: Env): Promise<Respons
 }
 
 async function handleCronStatus(req: Request, env: Env): Promise<Response> {
-    const rawCron = await env.FITBIT_KV.get("cron:last_sync");
-    const cron = rawCron ? JSON.parse(rawCron) : null;
-
-    const rawStats = await env.FITBIT_KV.get("cron:stats");
-    const stats = rawStats ? JSON.parse(rawStats) : null;
+    const cron = await getState<any>(env, "cron:last_sync");
+    const stats = await getState<any>(env, "cron:stats");
 
     const backfill = await getStateMigrating<BackfillState>(env, "backfill:progress") || { running: false };
 
@@ -741,8 +769,7 @@ async function handleDevCronTick(req: Request, env: Env): Promise<Response> {
     });
 
     // Fetch updated stats after cron work completes
-    const rawStats = await env.FITBIT_KV.get("cron:stats");
-    const stats = rawStats ? JSON.parse(rawStats) : null;
+    const stats = await getState<any>(env, "cron:stats");
 
     return jsonResponse(env, {
         ok: true,
@@ -771,27 +798,18 @@ async function handleHealth(req: Request, env: Env): Promise<Response> {
         d1Status = `error: ${e.message}`;
     }
 
-    // KV Check
-    let kvStatus = "unknown";
-    try {
-        await env.FITBIT_KV.list({ prefix: "health_check", limit: 1 });
-        kvStatus = "ok";
-    } catch (e: any) {
-        kvStatus = `error: ${e.message}`;
-    }
+    const kvStatus = "disabled";
 
     // Cron & Backfill
-    const cronRaw = await env.FITBIT_KV.get("cron:last_sync");
-    const statsRaw = await env.FITBIT_KV.get("cron:stats");
-    const cron = cronRaw ? JSON.parse(cronRaw) : null;
-    const stats = statsRaw ? JSON.parse(statsRaw) : null;
+    const cron = await getState<any>(env, "cron:last_sync");
+    const stats = await getState<any>(env, "cron:stats");
     const backfill = await getStateMigrating<BackfillState>(env, "backfill:progress");
 
     // Auth
     const authStatus = await getStateMigrating<{ required: boolean }>(env, "auth:required");
 
     return jsonResponse(env, {
-        ok: d1Status === "ok" && kvStatus === "ok",
+        ok: d1Status === "ok",
         checks: {
             d1: d1Status,
             kv: kvStatus,
@@ -1303,9 +1321,16 @@ async function syncDay(env: Env, date: string): Promise<number> {
 
     const maxStatus = Math.max(...responses.map(r => r.status));
 
-    // Check for critical failures (429/5xx) before processing? 
-    // Existing logic just tried to grab data.
-    // If we return status, caller decides.
+    // CRITICAL: If rate limited or auth failed, abort immediately.
+    // Do NOT parse partial data and do NOT write zeroes to D1.
+    if (responses.some(r => r.status === 429)) {
+        console.warn(`[syncDay] Rate limit (429) hit for ${date}. Aborting DB write.`);
+        return 429;
+    }
+    if (responses.some(r => r.status === 401)) {
+        console.warn(`[syncDay] Auth expired (401) for ${date}. Aborting DB write.`);
+        return 401;
+    }
 
     const [actRes, azmRes, sleepRes, heartRes, hrvRes] = responses;
 
@@ -1317,8 +1342,26 @@ async function syncDay(env: Env, date: string): Promise<number> {
     const distanceKm = summary.distances?.find((d: any) => d.activity === "total")?.distance || 0;
 
     // Parse AZM
+    // Priority A: Resource total (if finite number)
+    // Priority B: Breakdown sum fallback
+    // Priority C: 0
+    let azm = 0;
     const azmList = azmRes.data?.["activities-active-zone-minutes"];
-    const azm = (azmList && azmList[0]?.value?.activeZoneMinutes) || 0;
+    const azmEntry = azmList && azmList[0];
+
+    if (azmEntry?.value) {
+        if (typeof azmEntry.value === 'number' && Number.isFinite(azmEntry.value)) {
+            azm = azmEntry.value;
+        } else if (typeof azmEntry.value?.activeZoneMinutes === 'number' && Number.isFinite(azmEntry.value.activeZoneMinutes)) {
+            azm = azmEntry.value.activeZoneMinutes;
+        } else {
+            // Fallback: Sum parts
+            const fatBurn = azmEntry.value?.fatBurnActiveZoneMinutes || 0;
+            const cardio = azmEntry.value?.cardioActiveZoneMinutes || 0;
+            const peak = azmEntry.value?.peakActiveZoneMinutes || 0;
+            azm = fatBurn + cardio + peak;
+        }
+    }
 
     // Parse Heart
     let restingHr = 0, avgHr = 0, maxHr = 0; // Avg/max not readily available in summary, default 0
@@ -1335,20 +1378,113 @@ async function syncDay(env: Env, date: string): Promise<number> {
     }
 
     // Parse Sleep
-    let sleepMinutes = 0, timeInBed = 0, efficiency = 0;
+    // Priority A: Detailed logs (sum minutesAsleep for targetDate)
+    // Priority B: Summary fallback (totalMinutesAsleep)
+    // Priority C: 0
+    // Hard rule: never use totalTimeInBed or duration for sleepMinutes.
+
+    let sleepMinutes = 0;
+    // We keep other sleep stats for DB consistency but logic for sleepMinutes is strict
+    let timeInBed = 0;
+    let efficiency = 0;
     let sDeep = 0, sLight = 0, sRem = 0, sWake = 0;
-    if (sleepRes.ok && sleepRes.data?.sleep?.length > 0) {
-        const s = sleepRes.data.sleep.find((x: any) => x.isMainSleep) || sleepRes.data.sleep[0];
-        sleepMinutes = s.minutesAsleep || 0;
-        timeInBed = s.timeInBed || 0;
-        efficiency = s.efficiency || 0;
-        if (s.levels?.summary) {
-            sDeep = s.levels.summary.deep?.minutes || 0;
-            sLight = s.levels.summary.light?.minutes || 0;
-            sRem = s.levels.summary.rem?.minutes || 0;
-            sWake = s.levels.summary.wake?.minutes || 0;
+
+    let sleepFoundInDetails = false;
+
+    if (sleepRes.ok && Array.isArray(sleepRes.data?.sleep)) {
+        // A) Detailed logs
+        const sessionKeys = new Set<string>();
+        const relevantEntries: any[] = [];
+        const debugEnv = (env as any).DEBUG_SLEEP === "1";
+        const debugDate = (env as any).DEBUG_SLEEP_DATE || ""; // Optional specific date filter
+        const shouldLog = debugEnv && (!debugDate || debugDate === date);
+
+        // First pass: collect for debug if enabled
+        if (shouldLog) {
+            console.log(`[DEBUG_SLEEP] Target Date: ${date} | Total Raw Logs: ${sleepRes.data.sleep.length}`);
+            sleepRes.data.sleep.forEach((l: any) => {
+                const info = [
+                    `ID:${l.logId}`,
+                    `Main:${l.isMainSleep}`,
+                    `Mins:${l.minutesAsleep}`,
+                    `DOS:${l.dateOfSleep}`,
+                    `Start:${l.startTime}`,
+                    `End:${l.endTime}`
+                ];
+                if (l.type) info.push(`Type:${l.type}`);
+                if (l.sleepType) info.push(`SleepType:${l.sleepType}`);
+                if (l.infoCode) info.push(`InfoCode:${l.infoCode}`);
+                if (l.levels?.summary) info.push(`LevelsOK`);
+                if (l.levels?.data) info.push(`DataLen:${l.levels.data.length}`);
+
+                console.log(`[DEBUG_SLEEP] RAW_ENTRY | ${info.join(' | ')}`);
+            });
+        }
+
+        // Second pass: include logs based on Fitbit day attribution rules
+        for (const log of sleepRes.data.sleep) {
+            let include = false;
+
+            // Rule: Prioritize endTime date (wake date). Fallback to dateOfSleep if endTime missing.
+            if (log.endTime) {
+                const endDate = log.endTime.split('T')[0];
+                if (endDate === date) include = true;
+            } else if (log.dateOfSleep === date) {
+                // Fallback only if endTime is missing
+                include = true;
+            }
+
+            if (include) {
+                // Deduplicate by session key (startTime + endTime), not logId
+                // Some duplicate entries have different logIds but represent same session
+                const sessionKey = `${log.startTime || 'unknown'}_${log.endTime || 'unknown'}`;
+                if (!sessionKeys.has(sessionKey)) {
+                    sessionKeys.add(sessionKey);
+                    relevantEntries.push(log);
+                }
+            }
+        }
+
+        if (shouldLog) {
+            const inclSum = relevantEntries.reduce((sum: number, s: any) => sum + (Number(s.minutesAsleep) || 0), 0);
+            const mainCount = relevantEntries.filter((s: any) => s.isMainSleep).length;
+            const keys = Array.from(sessionKeys).join(', ');
+            const fallbackUsed = relevantEntries.length === 0 ? 'will_use_fallback' : 'no';
+
+            console.log(`[DEBUG_SLEEP] INCLUSION | TargetDate:${date} | RawCount:${sleepRes.data.sleep.length} | IncludedCount:${relevantEntries.length} | IncludedSum:${inclSum} | MainCount:${mainCount} | Fallback:${fallbackUsed}`);
+            console.log(`[DEBUG_SLEEP] SESSION_KEYS | ${keys}`);
+        }
+
+        if (relevantEntries.length > 0) {
+            sleepFoundInDetails = true;
+            sleepMinutes = relevantEntries.reduce((sum: number, s: any) => sum + (Number(s.minutesAsleep) || 0), 0);
+
+            // Capture other stats from main sleep (best effort)
+            const mainSleep = relevantEntries.find((s: any) => s.isMainSleep) || relevantEntries[0];
+            timeInBed = mainSleep.timeInBed || 0;
+            efficiency = mainSleep.efficiency || 0;
+            if (mainSleep.levels?.summary) {
+                sDeep = mainSleep.levels.summary.deep?.minutes || 0;
+                sLight = mainSleep.levels.summary.light?.minutes || 0;
+                sRem = mainSleep.levels.summary.rem?.minutes || 0;
+                sWake = mainSleep.levels.summary.wake?.minutes || 0;
+            }
         }
     }
+
+    if (!sleepFoundInDetails && sleepRes.ok && sleepRes.data?.summary?.totalMinutesAsleep) {
+        // B) Summary fallback
+        const summaryVal = sleepRes.data.summary.totalMinutesAsleep;
+        if (Number.isFinite(summaryVal)) {
+            sleepMinutes = summaryVal;
+        }
+    }
+
+    // Final Coercion
+    sleepMinutes = Number.isFinite(sleepMinutes) ? sleepMinutes : 0;
+    azm = Number.isFinite(azm) ? azm : 0;
+
+
 
     try {
         await env.FITBIT_DB.prepare(`
@@ -1359,12 +1495,24 @@ async function syncDay(env: Env, date: string): Promise<number> {
             sleep_deep, sleep_light, sleep_rem, sleep_wake, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(date) DO UPDATE SET
-            steps=excluded.steps, calories_out=excluded.calories_out, distance_km=excluded.distance_km,
-            floors=excluded.floors, azm=excluded.azm, resting_hr=excluded.resting_hr,
-            hrv_rmssd=excluded.hrv_rmssd, sleep_minutes=excluded.sleep_minutes,
-            sleep_time_in_bed=excluded.sleep_time_in_bed, sleep_efficiency=excluded.sleep_efficiency,
-            sleep_deep=excluded.sleep_deep, sleep_light=excluded.sleep_light,
-            sleep_rem=excluded.sleep_rem, sleep_wake=excluded.sleep_wake, updated_at=excluded.updated_at
+            steps=excluded.steps, 
+            calories_out=excluded.calories_out, 
+            distance_km=excluded.distance_km,
+            floors=excluded.floors, 
+            azm=excluded.azm, 
+            resting_hr=excluded.resting_hr, 
+            avg_hr=excluded.avg_hr, 
+            max_hr=excluded.max_hr,
+            hrv_rmssd=excluded.hrv_rmssd, 
+            hrv_coverage=excluded.hrv_coverage,
+            sleep_minutes=excluded.sleep_minutes,
+            sleep_time_in_bed=excluded.sleep_time_in_bed, 
+            sleep_efficiency=excluded.sleep_efficiency,
+            sleep_deep=excluded.sleep_deep, 
+            sleep_light=excluded.sleep_light,
+            sleep_rem=excluded.sleep_rem, 
+            sleep_wake=excluded.sleep_wake, 
+            updated_at=excluded.updated_at
     `).bind(
             date, steps, caloriesOut, distanceKm, floors, azm,
             restingHr, avgHr, maxHr, hrvRmssd, hrvCoverage,
@@ -1388,7 +1536,7 @@ async function syncDay(env: Env, date: string): Promise<number> {
 
 async function handleAuth(req: Request, env: Env): Promise<Response> {
     const state = crypto.randomUUID();
-    await env.FITBIT_KV.put(`oauth_state_${state}`, "valid", { expirationTtl: 600 }); // 10 mins
+    await setExpiringState(env, `oauth_state_${state}`, "valid", 600000); // 10 mins
 
     const params = new URLSearchParams({
         response_type: "code",
@@ -1412,11 +1560,8 @@ async function handleCallback(req: Request, env: Env): Promise<Response> {
     if (!code || !state) return new Response("Missing code or state", { status: 400 });
 
     // Validate state
-    const storedState = await env.FITBIT_KV.get(`oauth_state_${state}`);
+    const storedState = await consumeExpiringState<string>(env, `oauth_state_${state}`);
     if (!storedState) return new Response("Invalid or expired state", { status: 400 });
-
-    // Cleanup state
-    await env.FITBIT_KV.delete(`oauth_state_${state}`);
 
     // Exchange token
     const tokens = await exchangeToken(env, code);
@@ -1621,6 +1766,148 @@ async function handleHRVToday(req: Request, env: Env): Promise<Response> {
     return jsonResponse(env, { summary: stats });
 }
 
+async function handleCatalog(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+
+    const resources = [
+        {
+            name: "Activity Summary",
+            endpointUrl: "/1/user/-/activities/date/{date}.json",
+            sampleFields: ["summary.steps", "summary.caloriesOut", "summary.distances[*].distance", "summary.floors"],
+            numericMetrics: ["steps", "caloriesOut", "distanceKm", "floors"],
+            numericFields: ["summary.steps", "summary.caloriesOut", "summary.distances[*].distance", "summary.floors", "summary.veryActiveMinutes", "summary.fairlyActiveMinutes"],
+            coverageWhere: "steps > 0 OR calories_out > 0 OR distance_km > 0 OR floors > 0"
+        },
+        {
+            name: "Active Zone Minutes",
+            endpointUrl: "/1/user/-/activities/active-zone-minutes/date/{date}.json",
+            sampleFields: ["activities-active-zone-minutes[0].value.activeZoneMinutes"],
+            numericMetrics: ["activeZoneMinutes"],
+            numericFields: ["activities-active-zone-minutes[0].value.activeZoneMinutes", "activities-active-zone-minutes[0].value.fatBurnActiveZoneMinutes", "activities-active-zone-minutes[0].value.cardioActiveZoneMinutes", "activities-active-zone-minutes[0].value.peakActiveZoneMinutes"],
+            coverageWhere: "azm > 0"
+        },
+        {
+            name: "Sleep Summary",
+            endpointUrl: "/1/user/-/sleep/date/{date}.json",
+            sampleFields: ["summary.totalMinutesAsleep", "summary.totalTimeInBed", "sleep[0].minutesAsleep", "sleep[0].timeInBed", "sleep[0].efficiency"],
+            numericMetrics: ["sleepMinutes", "sleepTimeInBed", "sleepEfficiency"],
+            numericFields: ["summary.totalMinutesAsleep", "summary.totalTimeInBed", "sleep[0].minutesAsleep", "sleep[0].timeInBed", "sleep[0].efficiency"],
+            coverageWhere: "sleep_minutes > 0 OR sleep_time_in_bed > 0 OR sleep_efficiency > 0"
+        },
+        {
+            name: "Sleep Stages",
+            endpointUrl: "/1/user/-/sleep/date/{date}.json",
+            sampleFields: ["sleep[0].levels.summary.deep.minutes", "sleep[0].levels.summary.light.minutes", "sleep[0].levels.summary.rem.minutes", "sleep[0].levels.summary.wake.minutes"],
+            numericMetrics: ["sleepDeep", "sleepLight", "sleepRem", "sleepWake"],
+            numericFields: ["sleep[0].levels.summary.deep.minutes", "sleep[0].levels.summary.light.minutes", "sleep[0].levels.summary.rem.minutes", "sleep[0].levels.summary.wake.minutes", "sleep[0].levels.summary.deep.count", "sleep[0].levels.summary.light.count", "sleep[0].levels.summary.rem.count", "sleep[0].levels.summary.wake.count"],
+            coverageWhere: "sleep_deep > 0 OR sleep_light > 0 OR sleep_rem > 0 OR sleep_wake > 0"
+        },
+        {
+            name: "Heart Rate (Daily)",
+            endpointUrl: "/1/user/-/activities/heart/date/{date}/1d.json",
+            sampleFields: ["activities-heart[0].value.restingHeartRate"],
+            numericMetrics: ["restingHeartRate", "averageHeartRate", "maxHeartRate"],
+            numericFields: ["activities-heart[0].value.restingHeartRate", "activities-heart[0].value.heartRateZones[0].minutes", "activities-heart[0].value.heartRateZones[1].minutes", "activities-heart[0].value.heartRateZones[2].minutes"],
+            coverageWhere: "resting_hr > 0 OR avg_hr > 0 OR max_hr > 0"
+        },
+        {
+            name: "Heart Rate (Intraday)",
+            endpointUrl: "/1/user/-/activities/heart/date/{date}/1d/1min.json",
+            sampleFields: ["activities-heart-intraday.dataset[*].time", "activities-heart-intraday.dataset[*].value"],
+            numericMetrics: ["heartRate"],
+            numericFields: ["activities-heart-intraday.dataset[*].value"],
+            coverageWhere: "resting_hr > 0"
+        },
+        {
+            name: "HRV (Daily)",
+            endpointUrl: "/1/user/-/hrv/date/{date}.json",
+            sampleFields: ["hrv[0].value.dailyRmssd"],
+            numericMetrics: ["hrvRmssd"],
+            numericFields: ["hrv[0].value.dailyRmssd", "hrv[0].value.deepRmssd"],
+            coverageWhere: "hrv_rmssd > 0 OR hrv_coverage > 0"
+        },
+        {
+            name: "Activity Time Series (Steps)",
+            endpointUrl: "/1/user/-/activities/steps/date/{start}/{end}.json",
+            sampleFields: ["activities-steps[*].dateTime", "activities-steps[*].value"],
+            numericMetrics: ["steps"],
+            coverageWhere: "steps > 0"
+        },
+        {
+            name: "Activity Time Series (Distance)",
+            endpointUrl: "/1/user/-/activities/distance/date/{start}/{end}.json",
+            sampleFields: ["activities-distance[*].dateTime", "activities-distance[*].value"],
+            numericMetrics: ["distanceKm"],
+            coverageWhere: "distance_km > 0"
+        },
+        {
+            name: "Activity Time Series (Calories)",
+            endpointUrl: "/1/user/-/activities/calories/date/{start}/{end}.json",
+            sampleFields: ["activities-calories[*].dateTime", "activities-calories[*].value"],
+            numericMetrics: ["caloriesOut"],
+            coverageWhere: "calories_out > 0"
+        },
+        {
+            name: "Activity Time Series (Active Zone Minutes)",
+            endpointUrl: "/1/user/-/activities/active-zone-minutes/date/{start}/{end}.json",
+            sampleFields: ["activities-active-zone-minutes[*].dateTime", "activities-active-zone-minutes[*].value"],
+            numericMetrics: ["activeZoneMinutes"],
+            coverageWhere: "azm > 0"
+        }
+    ];
+
+    let rangeStart: string | null = null;
+    let rangeEnd: string | null = null;
+    let totalRows = 0;
+    try {
+        const rangeRow = await env.FITBIT_DB.prepare(
+            "SELECT MIN(date) as min_date, MAX(date) as max_date, COUNT(*) as total_rows FROM daily_metrics"
+        ).first();
+        rangeStart = rangeRow?.min_date || null;
+        rangeEnd = rangeRow?.max_date || null;
+        totalRows = Number(rangeRow?.total_rows || 0);
+    } catch (e: any) {
+        if (e.message && e.message.includes("no such table")) {
+            return jsonResponse(env, {
+                generatedAt: new Date().toISOString(),
+                range: { start: null, end: null, expectedDays: 0, totalRows: 0 },
+                resources: []
+            });
+        }
+        throw e;
+    }
+
+    const expectedDays = rangeStart && rangeEnd ? daysBetweenInclusive(rangeStart, rangeEnd) : 0;
+
+    const catalog = [];
+    for (const resource of resources) {
+        let daysPresent = 0;
+        let lastUpdated: string | null = null;
+        if (expectedDays > 0) {
+            const row = await env.FITBIT_DB.prepare(
+                `SELECT COUNT(*) as count, MAX(updated_at) as last_updated FROM daily_metrics WHERE ${resource.coverageWhere}`
+            ).first();
+            daysPresent = Number(row?.count || 0);
+            lastUpdated = row?.last_updated || null;
+        }
+
+        catalog.push({
+            resourceName: resource.name,
+            endpointUrl: resource.endpointUrl,
+            sampleFields: resource.sampleFields,
+            numericMetrics: resource.numericMetrics,
+            coverage: { daysPresent, expectedDays },
+            lastUpdated
+        });
+    }
+
+    return jsonResponse(env, {
+        generatedAt: new Date().toISOString(),
+        range: { start: rangeStart, end: rangeEnd, expectedDays, totalRows },
+        resources: catalog
+    });
+}
+
 // --- Phase 2B: D1 Handlers & Sync ---
 
 async function handleSyncTrigger(req: Request, env: Env): Promise<Response> {
@@ -1644,11 +1931,10 @@ async function handleHistory(req: Request, env: Env): Promise<Response> {
 
     // A) Cache-read
     const cacheKey = `history:${rangeDays}`;
-    const cachedRaw = await env.FITBIT_KV.get(cacheKey);
-    if (cachedRaw) {
-        const data = JSON.parse(cachedRaw);
-        data.cached = true;
-        return jsonResponse(env, data);
+    const cached = await getExpiringState<any>(env, cacheKey);
+    if (cached) {
+        cached.cached = true;
+        return jsonResponse(env, cached);
     }
     const end = new Date();
     const start = new Date();
@@ -1702,7 +1988,7 @@ async function handleHistory(req: Request, env: Env): Promise<Response> {
     };
 
     // B) Cache-write
-    await env.FITBIT_KV.put(cacheKey, JSON.stringify(responseData), { expirationTtl: 600 });
+    await setExpiringState(env, cacheKey, responseData, 600000);
 
     (responseData as any).cached = false;
     return jsonResponse(env, responseData);
@@ -1745,9 +2031,6 @@ async function handleDay(req: Request, env: Env): Promise<Response> {
         metrics: sanitized
     });
 }
-
-
-
 
 
 // --- Shared Helpers ---
@@ -1823,6 +2106,14 @@ function jsonResponse(env: Env, data: any, status = 200) {
     });
 }
 
+function daysBetweenInclusive(start: string, end: string): number {
+    const startDate = new Date(`${start}T00:00:00Z`).getTime();
+    const endDate = new Date(`${end}T00:00:00Z`).getTime();
+    if (isNaN(startDate) || isNaN(endDate)) return 0;
+    if (endDate < startDate) return 0;
+    return Math.floor((endDate - startDate) / 86400000) + 1;
+}
+
 // Re-using fetchFitbitJSON with internal retry/auth handling
 // ...
 
@@ -1893,22 +2184,17 @@ async function makeTokenRequest(env: Env, body: URLSearchParams): Promise<TokenB
 const TOKEN_KEY = "user_tokens_v1";
 
 async function storeTokens(env: Env, tokens: TokenBundle) {
-    await env.FITBIT_KV.put(TOKEN_KEY, JSON.stringify(tokens));
+    await setState(env, TOKEN_KEY, tokens);
     await setState(env, "auth:required", { required: false, lastError: null });
 }
 
 async function getTokens(env: Env): Promise<TokenBundle | null> {
-    const raw = await env.FITBIT_KV.get(TOKEN_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as TokenBundle;
+    return getState<TokenBundle>(env, TOKEN_KEY);
 }
 
 // C) Cache-bust helper
 async function invalidateHistoryCache(env: Env) {
-    const list = await env.FITBIT_KV.list({ prefix: "history:" });
-    for (const key of list.keys) {
-        await env.FITBIT_KV.delete(key.name);
-    }
+    await deleteStateByPrefix(env, "history:");
 }
 
 // --- Data Quality Guards ---
@@ -1979,8 +2265,8 @@ function sanitizeDailyMetrics(date: string, raw: any): any {
 // --- Cron Stats Helper ---
 
 async function updateCronStats(env: Env, success: boolean, duration: number, details?: { newDays: number, retriedDays: number, blockedByAuth: boolean }) {
-    const rawCheck = await env.FITBIT_KV.get("cron:stats");
-    let stats = rawCheck ? JSON.parse(rawCheck) : {
+    const existing = await getState<any>(env, "cron:stats");
+    let stats = existing || {
         runs: 0,
         successes: 0,
         failures: 0,
@@ -2019,7 +2305,7 @@ async function updateCronStats(env: Env, success: boolean, duration: number, det
         stats.nextRetryAt = null;
     }
 
-    await env.FITBIT_KV.put("cron:stats", JSON.stringify(stats));
+    await setState(env, "cron:stats", stats);
 }
 
 // --- Automated Backfill Helper ---
