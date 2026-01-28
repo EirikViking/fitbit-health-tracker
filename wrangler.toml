@@ -13,3 +13,5 @@ crons = ["15 1 * * *", "*/2 * * * *"]
 directory = "./public"
 binding = "ASSETS"
 
+[vars]
+DEBUG_SLEEP = "1"

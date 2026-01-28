@@ -1321,9 +1321,16 @@ async function syncDay(env: Env, date: string): Promise<number> {
 
     const maxStatus = Math.max(...responses.map(r => r.status));
 
-    // Check for critical failures (429/5xx) before processing? 
-    // Existing logic just tried to grab data.
-    // If we return status, caller decides.
+    // CRITICAL: If rate limited or auth failed, abort immediately.
+    // Do NOT parse partial data and do NOT write zeroes to D1.
+    if (responses.some(r => r.status === 429)) {
+        console.warn(`[syncDay] Rate limit (429) hit for ${date}. Aborting DB write.`);
+        return 429;
+    }
+    if (responses.some(r => r.status === 401)) {
+        console.warn(`[syncDay] Auth expired (401) for ${date}. Aborting DB write.`);
+        return 401;
+    }
 
     const [actRes, azmRes, sleepRes, heartRes, hrvRes] = responses;
 

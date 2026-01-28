@@ -1,4 +1,4 @@
-const fetch = require('node-fetch'); // NOTE: Assuming node-fetch is available or using native fetch in Node 18+
+// const fetch = require('node-fetch'); // Using native fetch in Node 18+
 
 const BASE_URL = 'https://fitbit-health-tracker.cromkake.workers.dev';
 
