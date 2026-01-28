@@ -85,26 +85,99 @@ function createTooltip(metricKey) {
 }
 
 // Range Picker Functions
+function pad2(value) {
+    return String(value).padStart(2, '0');
+}
+
+function toISODateString(year, month, day) {
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function toLocalISODate(date) {
+    return toISODateString(date.getFullYear(), date.getMonth() + 1, date.getDate());
+}
+
+function getDatePartsInTimeZone(date, timeZone) {
+    try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).formatToParts(date);
+        const values = {};
+        parts.forEach(p => {
+            if (p.type === 'year' || p.type === 'month' || p.type === 'day') {
+                values[p.type] = Number(p.value);
+            }
+        });
+        if (!values.year || !values.month || !values.day) return null;
+        return values;
+    } catch (e) {
+        return null;
+    }
+}
+
+function getOsloTodayISO() {
+    const parts = getDatePartsInTimeZone(new Date(), 'Europe/Oslo');
+    if (!parts) return toLocalISODate(new Date());
+    return toISODateString(parts.year, parts.month, parts.day);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function parseISOToUTC(isoDate) {
+    const [year, month, day] = isoDate.split('-').map(Number);
+    return Date.UTC(year, month - 1, day);
+}
+
+function daysBetweenInclusive(startISO, endISO) {
+    if (!startISO || !endISO) return 0;
+    const startUTC = parseISOToUTC(startISO);
+    const endUTC = parseISOToUTC(endISO);
+    return Math.floor((endUTC - startUTC) / 86400000) + 1;
+}
+
+function getDaysSinceYearStartOslo() {
+    const end = getOsloTodayISO();
+    const start = `${end.slice(0, 4)}-01-01`;
+    return daysBetweenInclusive(start, end);
+}
+
+function addDaysISO(isoDate, days) {
+    if (!isoDate) return null;
+    const [year, month, day] = isoDate.split('-').map(Number);
+    if (!year || !month || !day) return isoDate;
+    const d = new Date(year, month - 1, day);
+    d.setDate(d.getDate() + days);
+    return toLocalISODate(d);
+}
+
+function formatISODate(isoDate, options) {
+    if (!isoDate) return '';
+    const d = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return isoDate;
+    return d.toLocaleDateString(undefined, options);
+}
+
 function calculateDateRange(rangeType) {
-    const today = new Date();
-    const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate()); // Today at midnight
-    let startDate;
+    const endDate = getOsloTodayISO();
+    let startDate = null;
 
     switch (rangeType) {
         case '7d':
-            startDate = new Date(endDate);
-            startDate.setDate(endDate.getDate() - 6); // Last 7 days including today
+            startDate = addDaysISO(endDate, -6); // Last 7 days including today
             break;
         case '30d':
-            startDate = new Date(endDate);
-            startDate.setDate(endDate.getDate() - 29); // Last 30 days including today
+            startDate = addDaysISO(endDate, -29); // Last 30 days including today
             break;
         case '90d':
-            startDate = new Date(endDate);
-            startDate.setDate(endDate.getDate() - 89); // Last 90 days including today
+            startDate = addDaysISO(endDate, -89); // Last 90 days including today
             break;
         case 'ytd':
-            startDate = new Date(endDate.getFullYear(), 0, 1); // Jan 1 of current year
+            startDate = `${endDate.slice(0, 4)}-01-01`; // Jan 1 of current year
             break;
         case 'all':
         default:
@@ -112,8 +185,8 @@ function calculateDateRange(rangeType) {
     }
 
     return {
-        startDate: startDate.toISOString().split('T')[0],
-        endDate: endDate.toISOString().split('T')[0]
+        startDate,
+        endDate
     };
 }
 
@@ -153,8 +226,8 @@ function setRange(rangeType, shouldRender = true) {
     const rangeDisplay = document.getElementById('rangeDisplay');
     if (rangeDisplay) {
         if (startDate && endDate) {
-            const start = new Date(startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-            const end = new Date(endDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+            const start = formatISODate(startDate, { month: 'short', day: 'numeric' });
+            const end = formatISODate(endDate, { month: 'short', day: 'numeric', year: 'numeric' });
             rangeDisplay.textContent = `${start} - ${end}`;
         } else {
             rangeDisplay.textContent = 'All available data';
@@ -230,7 +303,7 @@ function findBestWorst(data, metricKey, higherIsBetter = true) {
 }
 
 function renderHighlightCard(type, date, value, unit, metricName) {
-    const formattedDate = new Date(date).toLocaleDateString(undefined, {
+    const formattedDate = formatISODate(date, {
         weekday: 'short',
         month: 'short',
         day: 'numeric'
@@ -755,6 +828,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     initDayInspector();
+    initRepairRecentDays();
 });
 
 // Period toggle function
@@ -1002,8 +1076,9 @@ async function loadDashboard() {
         if (cs) cs.classList.add('hidden');
         if (ds) ds.classList.remove('hidden');
 
-        // 2. Fetch History (60 days)
-        const histRes = await fetch('/api/history?days=60');
+        // 2. Fetch History (ensure enough for YTD)
+        const historyDays = Math.max(60, getDaysSinceYearStartOslo());
+        const histRes = await fetch(`/api/history?days=${historyDays}`);
         if (!histRes.ok) throw new Error('Failed to fetch history');
         const data = await histRes.json();
 
@@ -1732,7 +1807,7 @@ function renderKPIs(data) {
     // 1. Data Coverage & Header
     let dateRangeStr = last.date;
     if (currentPeriod !== 'daily' && last.startDate && last.endDate) {
-        dateRangeStr = `${new Date(last.startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${new Date(last.endDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+        dateRangeStr = `${formatISODate(last.startDate, { month: 'short', day: 'numeric' })} - ${formatISODate(last.endDate, { month: 'short', day: 'numeric' })}`;
     }
 
     const coverageVal = calcCoverage(last);
@@ -2057,6 +2132,7 @@ function renderActivityTab(data) {
         }
     }
 
+    const hasAzm = azmDays > 0;
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
@@ -2088,6 +2164,52 @@ function renderActivityTab(data) {
         </div>
     `;
     bindRepairBtn();
+
+    const activityTab = $('tab-activity');
+    if (!activityTab) return;
+    let chartCard = activityTab.querySelector('[data-activity-chart]');
+    if (!chartCard) {
+        chartCard = document.createElement('div');
+        chartCard.className = 'card';
+        chartCard.dataset.activityChart = 'true';
+        chartCard.innerHTML = `
+            <div class="card-title">Steps <span style="font-size:0.8rem">Daily</span></div>
+            <canvas id="chartSteps"></canvas>
+        `;
+        activityTab.appendChild(chartCard);
+    }
+
+    if (currentPeriod !== 'daily') {
+        chartCard.classList.add('hidden');
+        if (charts.activity) {
+            charts.activity.destroy();
+            charts.activity = null;
+        }
+        return;
+    }
+
+    chartCard.classList.remove('hidden');
+    const canvas = chartCard.querySelector('#chartSteps');
+    if (!canvas) return;
+
+    const labels = rows.map(r => r.date);
+    const displayLabels = labels.map(d => d.slice(5));
+    const stepsSeries = rows.map(r => safeNumber(r.steps));
+
+    if (charts.activity) charts.activity.destroy();
+    charts.activity = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: displayLabels,
+            datasets: [{
+                label: 'Steps',
+                data: stepsSeries,
+                backgroundColor: '#f59e0b',
+                borderRadius: 4
+            }]
+        },
+        options: createChartOptions('steps', rows)
+    });
 }
 
 function renderExportTab(data) {
@@ -2197,6 +2319,146 @@ function initDayInspector() {
     input.value = `${yyyy}-${mm}-${dd}`;
 
     btn.addEventListener('click', () => loadDayInspect(input.value));
+}
+
+function initRepairRecentDays() {
+    const btn = $('repairRecentBtn');
+    const statusEl = $('repairRecentStatus');
+    if (!btn || !statusEl) return;
+
+    console.log("[repair] ui initialized");
+
+    const defaultLabel = btn.textContent;
+    const renderStatus = (state) => {
+        statusEl.textContent = [
+            state.progress || '',
+            `ok: ${state.ok} | errors: ${state.errors} | repaired: ${state.repaired} | skipped: ${state.skipped}`,
+            state.last || ''
+        ].filter(Boolean).join('\n');
+    };
+
+    let isRunning = false;
+
+    const runRepair = async () => {
+        if (isRunning) {
+            console.log("[repair] already running");
+            return;
+        }
+        isRunning = true;
+        btn.disabled = true;
+        btn.textContent = "Running...";
+
+        const totalDays = 180;
+        const today = getOsloTodayISO();
+        const urlParams = new URLSearchParams(window.location.search || '');
+        const limitParam = Number(urlParams.get('limit'));
+        const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(Math.floor(limitParam), totalDays) : totalDays;
+        const autorun = urlParams.get('autorunRepair') === '1';
+        const skipLongPauses = autorun && limit <= 20;
+
+        const dates = [];
+        for (let i = limit - 1; i >= 0; i--) {
+            dates.push(addDaysISO(today, -i));
+        }
+
+        const startedAt = Date.now();
+        const state = {
+            ok: 0,
+            errors: 0,
+            repaired: 0,
+            skipped: 0,
+            progress: '',
+            last: ''
+        };
+
+        renderStatus(state);
+
+        for (let i = 0; i < dates.length; i++) {
+            const date = dates[i];
+            state.progress = `Processing ${i + 1} of ${limit}, date ${date}`;
+
+            try {
+                const res = await fetch(`/api/day?date=${date}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const json = await res.json();
+                const metrics = json?.metrics;
+                if (!metrics) {
+                    state.skipped++;
+                    state.last = `No metrics for ${date}`;
+                } else {
+                    state.ok++;
+                    const steps = metrics.steps;
+                    const calories = metrics.caloriesOut;
+                    const sleepMinutes = metrics.sleepMinutes;
+                    const rhr = metrics.restingHr;
+                    const hrv = metrics.hrvRmssd;
+                    const hasSignals = (calories > 0) || sleepMinutes !== null || rhr !== null || hrv !== null;
+
+                    if (steps === 0 && hasSignals) {
+                        await sleep(350);
+                        const res2 = await fetch(`/api/day?date=${date}`);
+                        if (res2.ok) {
+                            const json2 = await res2.json();
+                            const metrics2 = json2?.metrics;
+                            if (metrics2 && metrics2.steps > 0) {
+                                state.repaired++;
+                                state.last = `Repaired ${date}: steps ${steps} -> ${metrics2.steps}`;
+                            } else {
+                                state.last = `Checked ${date}: steps still ${steps}`;
+                            }
+                        } else {
+                            state.errors++;
+                            state.last = `Retry failed ${date} (HTTP ${res2.status})`;
+                        }
+                    } else {
+                        state.last = `Checked ${date}: steps ${steps}`;
+                    }
+                }
+            } catch (e) {
+                state.errors++;
+                state.last = `Error ${date}: ${e.message || e}`;
+            }
+
+            renderStatus(state);
+
+            const delay = 350 + Math.floor(Math.random() * 151);
+            await sleep(delay);
+            if (!skipLongPauses && (i + 1) % 10 === 0) {
+                await sleep(2000);
+            }
+        }
+
+        const ms = Date.now() - startedAt;
+        const donePayload = {
+            ok: state.ok,
+            errors: state.errors,
+            skipped: state.skipped,
+            repaired: state.repaired,
+            ms
+        };
+        window.__REPAIR_DONE__ = donePayload;
+        document.documentElement.dataset.repairDone = "1";
+        console.log(`[repair] done ok=${state.ok} errors=${state.errors} skipped=${state.skipped} repaired=${state.repaired} ms=${ms}`);
+        state.progress = `Done ${limit} of ${limit}`;
+        renderStatus(state);
+        isRunning = false;
+        btn.disabled = false;
+        btn.textContent = defaultLabel;
+    };
+
+    btn.addEventListener('click', async () => {
+        if (btn.classList) btn.classList.add('disabled');
+        await runRepair();
+        if (btn.classList) btn.classList.remove('disabled');
+    });
+
+    const urlParams = new URLSearchParams(window.location.search || '');
+    if (urlParams.get('autorunRepair') === '1') {
+        if (btn.classList) btn.classList.add('disabled');
+        runRepair().finally(() => {
+            if (btn.classList) btn.classList.remove('disabled');
+        });
+    }
 }
 
 async function loadDayInspect(date) {
