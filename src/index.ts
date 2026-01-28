@@ -1388,7 +1388,31 @@ async function syncDay(env: Env, date: string): Promise<number> {
         // A) Detailed logs
         const uniqueLogIds = new Set();
         const relevantEntries: any[] = [];
-        const debugSleep = (env as any).DEBUG_SLEEP === "1";
+        const debugEnv = (env as any).DEBUG_SLEEP === "1";
+        const debugDate = (env as any).DEBUG_SLEEP_DATE || ""; // Optional specific date filter
+        const shouldLog = debugEnv && (!debugDate || debugDate === date);
+
+        // First pass: just collect for debug if enabled
+        if (shouldLog) {
+            console.log(`[DEBUG_SLEEP] Target Date: ${date} | Total Raw Logs: ${sleepRes.data.sleep.length}`);
+            sleepRes.data.sleep.forEach((l: any) => {
+                const info = [
+                    `ID:${l.logId}`,
+                    `Main:${l.isMainSleep}`,
+                    `Mins:${l.minutesAsleep}`,
+                    `DOS:${l.dateOfSleep}`,
+                    `Start:${l.startTime}`,
+                    `End:${l.endTime}`
+                ];
+                if (l.type) info.push(`Type:${l.type}`);
+                if (l.sleepType) info.push(`SleepType:${l.sleepType}`);
+                if (l.infoCode) info.push(`InfoCode:${l.infoCode}`);
+                if (l.levels?.summary) info.push(`LevelsOK`);
+                if (l.levels?.data) info.push(`DataLen:${l.levels.data.length}`);
+
+                console.log(`[DEBUG_SLEEP] RAW_ENTRY | ${info.join(' | ')}`);
+            });
+        }
 
         for (const log of sleepRes.data.sleep) {
             let include = false;
@@ -1406,9 +1430,12 @@ async function syncDay(env: Env, date: string): Promise<number> {
             }
         }
 
-        if (debugSleep && relevantEntries.length > 0) {
-            const tempMins = relevantEntries.reduce((sum: number, s: any) => sum + (Number(s.minutesAsleep) || 0), 0);
-            console.log(`[DEBUG_SLEEP] Date: ${date} | Logs: ${relevantEntries.length} | Mins: ${tempMins} | IDs: ${Array.from(uniqueLogIds).join(',')}`);
+        if (shouldLog) {
+            const inclIds = Array.from(uniqueLogIds).join(',');
+            const inclSum = relevantEntries.reduce((sum: number, s: any) => sum + (Number(s.minutesAsleep) || 0), 0);
+            const mainCount = relevantEntries.filter((s: any) => s.isMainSleep).length;
+
+            console.log(`[DEBUG_SLEEP] INCLUSION | Count:${relevantEntries.length} | SumMins:${inclSum} | MainCount:${mainCount} | IDs:${inclIds}`);
         }
 
         if (relevantEntries.length > 0) {
