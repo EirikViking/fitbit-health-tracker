@@ -2182,9 +2182,9 @@ function renderActivityTab(data) {
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Active Mins</div>
-            <div class="kpi-value">${azm}</div>
-            <div class="text-sm">Period Total (AZM)</div>
-            ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
+            <div class="kpi-value">${azmDays > 0 && azm > 0 ? azm : '--'}</div>
+            <div class="text-sm">${azmDays > 0 && azm > 0 ? 'Period Total (AZM)' : 'Not available'}</div>
+            ${(azmDays > 0 && azm > 0 && count > 1) ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
             ${createTooltip('azm')}
         </div>
         ${highlightsHtml}
