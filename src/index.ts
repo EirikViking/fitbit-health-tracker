@@ -1393,13 +1393,13 @@ async function syncDay(env: Env, date: string): Promise<number> {
 
     if (sleepRes.ok && Array.isArray(sleepRes.data?.sleep)) {
         // A) Detailed logs
-        const uniqueLogIds = new Set();
+        const sessionKeys = new Set<string>();
         const relevantEntries: any[] = [];
         const debugEnv = (env as any).DEBUG_SLEEP === "1";
         const debugDate = (env as any).DEBUG_SLEEP_DATE || ""; // Optional specific date filter
         const shouldLog = debugEnv && (!debugDate || debugDate === date);
 
-        // First pass: just collect for debug if enabled
+        // First pass: collect for debug if enabled
         if (shouldLog) {
             console.log(`[DEBUG_SLEEP] Target Date: ${date} | Total Raw Logs: ${sleepRes.data.sleep.length}`);
             sleepRes.data.sleep.forEach((l: any) => {
@@ -1421,28 +1421,38 @@ async function syncDay(env: Env, date: string): Promise<number> {
             });
         }
 
+        // Second pass: include logs based on Fitbit day attribution rules
         for (const log of sleepRes.data.sleep) {
             let include = false;
-            // Rule: dateOfSleep matches target OR endTime is on target date
-            if (log.dateOfSleep === date) {
-                include = true;
-            } else if (log.endTime) {
+
+            // Rule: Prioritize endTime date (wake date). Fallback to dateOfSleep if endTime missing.
+            if (log.endTime) {
                 const endDate = log.endTime.split('T')[0];
                 if (endDate === date) include = true;
+            } else if (log.dateOfSleep === date) {
+                // Fallback only if endTime is missing
+                include = true;
             }
 
-            if (include && !uniqueLogIds.has(log.logId)) {
-                uniqueLogIds.add(log.logId);
-                relevantEntries.push(log);
+            if (include) {
+                // Deduplicate by session key (startTime + endTime), not logId
+                // Some duplicate entries have different logIds but represent same session
+                const sessionKey = `${log.startTime || 'unknown'}_${log.endTime || 'unknown'}`;
+                if (!sessionKeys.has(sessionKey)) {
+                    sessionKeys.add(sessionKey);
+                    relevantEntries.push(log);
+                }
             }
         }
 
         if (shouldLog) {
-            const inclIds = Array.from(uniqueLogIds).join(',');
             const inclSum = relevantEntries.reduce((sum: number, s: any) => sum + (Number(s.minutesAsleep) || 0), 0);
             const mainCount = relevantEntries.filter((s: any) => s.isMainSleep).length;
+            const keys = Array.from(sessionKeys).join(', ');
+            const fallbackUsed = relevantEntries.length === 0 ? 'will_use_fallback' : 'no';
 
-            console.log(`[DEBUG_SLEEP] INCLUSION | Count:${relevantEntries.length} | SumMins:${inclSum} | MainCount:${mainCount} | IDs:${inclIds}`);
+            console.log(`[DEBUG_SLEEP] INCLUSION | TargetDate:${date} | RawCount:${sleepRes.data.sleep.length} | IncludedCount:${relevantEntries.length} | IncludedSum:${inclSum} | MainCount:${mainCount} | Fallback:${fallbackUsed}`);
+            console.log(`[DEBUG_SLEEP] SESSION_KEYS | ${keys}`);
         }
 
         if (relevantEntries.length > 0) {
