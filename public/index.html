@@ -74,6 +74,23 @@
 
       <!-- Overview Tab -->
       <div id="tab-overview" class="tab-pane active">
+        <!-- Day Inspector -->
+        <div class="card" style="margin-bottom: 1.5rem;">
+          <div class="card-title">Inspect Specific Day</div>
+          <div style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
+            <input type="date" id="inspectDate"
+              style="padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; background: var(--bg-card); color: var(--text-primary);">
+            <button id="inspectBtn" class="btn-secondary" style="padding: 0.4rem 1rem;">Go</button>
+          </div>
+          <div id="inspectResult" class="metric-grid hidden"
+            style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem;">
+            <!-- Results go here -->
+          </div>
+          <div id="inspectLoading" class="hidden" style="color: var(--text-secondary); font-size: 0.9rem;">Loading...
+          </div>
+          <div id="inspectError" class="hidden" style="color: var(--error); font-size: 0.9rem;"></div>
+        </div>
+
         <!-- Loading Skeleton -->
         <div id="loadingSkeleton" class="hidden">
           <div class="kpi-grid">
@@ -152,14 +169,18 @@
             </div>
           </div>
 
-          <div style="background: var(--glass-bg); height: 8px; border-radius: 999px; overflow: hidden; margin: 1.5rem 0;">
-            <div id="bf-progress-bar" style="height: 100%; background: var(--primary); transition: width 0.5s; width: 0%"></div>
+          <div
+            style="background: var(--glass-bg); height: 8px; border-radius: 999px; overflow: hidden; margin: 1.5rem 0;">
+            <div id="bf-progress-bar"
+              style="height: 100%; background: var(--primary); transition: width 0.5s; width: 0%"></div>
           </div>
 
-          <div id="bf-error-section" class="hidden" style="margin-top: 1.5rem; padding: 1rem; background: var(--error-bg); border-radius: var(--radius-md); border: 1px solid var(--error);">
+          <div id="bf-error-section" class="hidden"
+            style="margin-top: 1.5rem; padding: 1rem; background: var(--error-bg); border-radius: var(--radius-md); border: 1px solid var(--error);">
             <div style="margin-bottom: 0.5rem;">
               <span class="text-xs" style="color: var(--error);">Error Type</span>
-              <span id="bf-error-type" class="text-sm" style="display: block; margin-top: 0.25rem; font-weight: 600;">--</span>
+              <span id="bf-error-type" class="text-sm"
+                style="display: block; margin-top: 0.25rem; font-weight: 600;">--</span>
             </div>
             <div style="margin-bottom: 0.5rem;">
               <span class="text-xs">Message</span>

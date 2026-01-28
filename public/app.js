@@ -753,6 +753,8 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
     });
+
+    initDayInspector();
 });
 
 // Period toggle function
@@ -1524,14 +1526,14 @@ function renderBackfillCard(data) {
 
             // Explicit Rate Limit / Retry Status Line
             if (err.nextRetryAt && new Date(err.nextRetryAt) > new Date()) {
-                if(retryRow) retryRow.classList.remove('hidden');
+                if (retryRow) retryRow.classList.remove('hidden');
                 const nextRetryEl = $('bf-next-retry');
-                if(nextRetryEl) nextRetryEl.textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
+                if (nextRetryEl) nextRetryEl.textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
             } else {
-                if(retryRow) retryRow.classList.add('hidden');
+                if (retryRow) retryRow.classList.add('hidden');
             }
         } else {
-            if(errSec) errSec.classList.add('hidden');
+            if (errSec) errSec.classList.add('hidden');
         }
 
         // Raw Debug
@@ -2176,6 +2178,78 @@ function downloadCSV(data, filename) {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        URL.revokeObjectURL(url);
+    }
+}
+
+// --- Day Inspector ---
+function initDayInspector() {
+    const input = $('inspectDate');
+    const btn = $('inspectBtn');
+
+    if (!input || !btn) return;
+
+    // Default to today
+    const now = new Date();
+    // Format YYYY-MM-DD local
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    input.value = `${yyyy}-${mm}-${dd}`;
+
+    btn.addEventListener('click', () => loadDayInspect(input.value));
+}
+
+async function loadDayInspect(date) {
+    if (!date) return;
+
+    const resultDiv = $('inspectResult');
+    const loadingDiv = $('inspectLoading');
+    const errorDiv = $('inspectError');
+
+    resultDiv.classList.add('hidden');
+    errorDiv.classList.add('hidden');
+    loadingDiv.classList.remove('hidden');
+    resultDiv.innerHTML = '';
+
+    try {
+        const res = await fetch(`/api/day?date=${date}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        loadingDiv.classList.add('hidden');
+
+        if (!data || !data.metrics) {
+            errorDiv.textContent = 'No data found for this date.';
+            errorDiv.classList.remove('hidden');
+            return;
+        }
+
+        const m = data.metrics;
+        // Render simple cards
+        // metrics: steps, caloriesOut, distanceKm, azm, sleepMinutes, restingHr, hrvRmssd etc.
+        const items = [
+            { label: 'Steps', val: m.steps?.toLocaleString() },
+            { label: 'Sleep', val: m.sleepMinutes ? `${Math.floor(m.sleepMinutes / 60)}h ${m.sleepMinutes % 60}m` : '0h 0m' },
+            { label: 'AZM', val: m.azm + ' min' },
+            { label: 'Resting HR', val: m.restingHr ? m.restingHr + ' bpm' : '--' },
+            { label: 'HRV', val: m.hrvRmssd ? Math.round(m.hrvRmssd) + ' ms' : '--' },
+            { label: 'Calories', val: m.caloriesOut?.toLocaleString() },
+            { label: 'Distance', val: m.distanceKm?.toFixed(2) + ' km' }
+        ];
+
+        resultDiv.innerHTML = items.map(item => `
+            <div style="background: var(--bg-body); padding: 0.75rem; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.25rem;">${item.label}</div>
+                <div style="font-size: 1.1rem; font-weight: 600;">${item.val}</div>
+            </div>
+        `).join('');
+
+        resultDiv.classList.remove('hidden');
+
+    } catch (e) {
+        console.error(e);
+        loadingDiv.classList.add('hidden');
+        errorDiv.textContent = 'Failed to load data: ' + e.message;
+        errorDiv.classList.remove('hidden');
     }
 }
