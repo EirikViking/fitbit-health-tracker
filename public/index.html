@@ -30,13 +30,6 @@
       </div>
     </header>
 
-    <!-- Period Toggle -->
-    <div id="periodToggle" class="period-toggle">
-      <button class="btn-secondary active" data-period="daily" onclick="setPeriod('daily')">Daily</button>
-      <button class="btn-secondary" data-period="weekly" onclick="setPeriod('weekly')">Weekly</button>
-      <button class="btn-secondary" data-period="monthly" onclick="setPeriod('monthly')">Monthly</button>
-    </div>
-
     <!-- Connect Prompt -->
     <div id="connectSection" class="connect-prompt hidden">
       <div class="empty-state">
@@ -49,29 +42,35 @@
     </div>
 
     <!-- Dashboard Section -->
-    <div id="dashboardSection" class="hidden">
-      <!-- Navigation -->
+    <div id="dashboardSection" class="hidden">      <!-- Navigation -->
       <nav>
         <button class="nav-btn active" data-tab="overview" onclick="switchTab('overview')">
-          <span class="nav-icon">📊</span> Overview
+          <span class="nav-icon">•</span> Overview
         </button>
         <button class="nav-btn" data-tab="sleep" onclick="switchTab('sleep')">
-          <span class="nav-icon">😴</span> Sleep
+          <span class="nav-icon">•</span> Sleep
         </button>
         <button class="nav-btn" data-tab="recovery" onclick="switchTab('recovery')">
-          <span class="nav-icon">💪</span> Recovery
+          <span class="nav-icon">•</span> Recovery
         </button>
         <button class="nav-btn" data-tab="activity" onclick="switchTab('activity')">
-          <span class="nav-icon">🏃</span> Activity
+          <span class="nav-icon">•</span> Activity
         </button>
         <button class="nav-btn" data-tab="backfill" onclick="switchTab('backfill')">
-          <span class="nav-icon">⏳</span> Backfill
+          <span class="nav-icon">•</span> Backfill
         </button>
         <button class="nav-btn" data-tab="exports" onclick="switchTab('exports')">
-          <span class="nav-icon">📥</span> Exports
+          <span class="nav-icon">•</span> Exports
         </button>
       </nav>
 
+      <!-- View options -->
+      <div id="periodToggle" class="period-toggle" style="margin-top:0.5rem; text-align:center;">
+        <span style="font-size:0.8rem; color:var(--text-secondary); margin-right:0.5rem;">Group by</span>
+        <button class="btn-secondary active" data-period="daily" onclick="setPeriod('daily')" style="font-size:0.85rem;">Daily</button>
+        <button class="btn-secondary" data-period="weekly" onclick="setPeriod('weekly')" style="font-size:0.85rem;">Weekly</button>
+        <button class="btn-secondary" data-period="monthly" onclick="setPeriod('monthly')" style="font-size:0.85rem;">Monthly</button>
+      </div>
       <!-- Overview Tab -->
       <div id="tab-overview" class="tab-pane active">
         <!-- Day Inspector -->
@@ -128,6 +127,9 @@
             <div class="card-title">HRV (RMSSD) <span style="font-size:0.8rem">ms</span></div>
             <canvas id="chartHRV"></canvas>
           </div>
+        </div>
+        <div id="chartEstimatedNote" data-testid="chart-estimated-note" class="text-xs" style="margin-top:0.75rem; color: var(--text-secondary);">
+          Estimated segments fill missing Fitbit data for visualization only and do not affect totals.
         </div>
       </div>
 
@@ -289,3 +291,6 @@
 </body>
 
 </html>
+
+
+

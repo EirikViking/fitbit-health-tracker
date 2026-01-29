@@ -5,9 +5,10 @@ let dashboardData = null;
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
 let viewMode = 'calendar';
 let repairState = null;
-let currentRange = localStorage.getItem('fitbit_range') || 'all'; // 7d, 30d, 90d, ytd, all
+let currentRange = localStorage.getItem('fitbit_range') || 'all'; // 7d, 30d, 90d, ytd, all, custom
 let rangeStartDate = null;
 let rangeEndDate = null;
+let lastPresetRange = 'all'; // Track last preset for reset functionality
 let compareMode = localStorage.getItem('fitbit_compare') === 'true'; // Compare current vs previous period
 const $ = (id) => document.getElementById(id);
 
@@ -95,6 +96,24 @@ function toISODateString(year, month, day) {
 
 function toLocalISODate(date) {
     return toISODateString(date.getFullYear(), date.getMonth() + 1, date.getDate());
+}
+
+function safeClassList(el, fn) {
+    if (!el || !el.classList) return;
+    fn(el.classList);
+}
+
+function waitForElement(selector, timeout = 10000) {
+    return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const check = () => {
+            const el = document.querySelector(selector);
+            if (el) return resolve(el);
+            if (Date.now() - start > timeout) return reject(new Error('timeout'));
+            requestAnimationFrame(check);
+        };
+        check();
+    });
 }
 
 function getDatePartsInTimeZone(date, timeZone) {
@@ -208,6 +227,11 @@ function setRange(rangeType, shouldRender = true) {
     currentRange = rangeType;
     localStorage.setItem('fitbit_range', rangeType);
 
+    // Track last preset range (for reset functionality)
+    if (rangeType !== 'custom') {
+        lastPresetRange = rangeType;
+    }
+
     // Calculate date range
     const { startDate, endDate } = calculateDateRange(rangeType);
     rangeStartDate = startDate;
@@ -216,9 +240,9 @@ function setRange(rangeType, shouldRender = true) {
     // Update UI
     document.querySelectorAll('.range-btn').forEach(btn => {
         if (btn.dataset.range === rangeType) {
-            btn.classList.add('active');
+            safeClassList(btn, cl => cl.add('active'));
         } else {
-            btn.classList.remove('active');
+            safeClassList(btn, cl => cl.remove('active'));
         }
     });
 
@@ -234,9 +258,94 @@ function setRange(rangeType, shouldRender = true) {
         }
     }
 
+    // Clear custom range error
+    const errorEl = document.getElementById('customRangeError');
+    if (errorEl) {
+        safeClassList(errorEl, cl => cl.add('hidden'));
+        errorEl.textContent = '';
+    }
+
     // Re-render with filtered data
     if (shouldRender && dashboardData) {
         renderAll();
+    }
+}
+
+function setCustomRange(fromDate, toDate) {
+    // Clear previous error
+    const errorEl = document.getElementById('customRangeError');
+    if (errorEl) {
+        safeClassList(errorEl, cl => cl.add('hidden'));
+        errorEl.textContent = '';
+    }
+
+    // Validate inputs
+    if (!fromDate || !toDate) {
+        showCustomRangeError('Please enter both From and To dates');
+        return;
+    }
+
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(fromDate) || !dateRegex.test(toDate)) {
+        showCustomRangeError('Invalid date format. Use YYYY-MM-DD');
+        return;
+    }
+
+    // Validate From <= To
+    if (fromDate > toDate) {
+        showCustomRangeError('From date must be before or equal to To date');
+        return;
+    }
+
+    // Set custom range
+    currentRange = 'custom';
+    localStorage.setItem('fitbit_range', 'custom');
+    rangeStartDate = fromDate;
+    rangeEndDate = toDate;
+
+    // Deactivate all preset buttons
+    document.querySelectorAll('.range-btn').forEach(btn => {
+        safeClassList(btn, cl => cl.remove('active'));
+    });
+
+    // Update range display
+    const rangeDisplay = document.getElementById('rangeDisplay');
+    if (rangeDisplay) {
+        const start = formatISODate(fromDate, { month: 'short', day: 'numeric' });
+        const end = formatISODate(toDate, { month: 'short', day: 'numeric', year: 'numeric' });
+        rangeDisplay.textContent = `${start} - ${end}`;
+    }
+
+    // Re-render with custom range
+    if (dashboardData) {
+        renderAll();
+    }
+}
+
+function resetToPresetRange() {
+    // Clear custom inputs
+    const fromInput = document.getElementById('customFromDate');
+    const toInput = document.getElementById('customToDate');
+    if (fromInput) fromInput.value = '';
+    if (toInput) toInput.value = '';
+
+    // Clear error
+    const errorEl = document.getElementById('customRangeError');
+    if (errorEl) {
+        safeClassList(errorEl, cl => cl.add('hidden'));
+        errorEl.textContent = '';
+    }
+
+    // Restore last preset range
+    setRange(lastPresetRange, true);
+}
+
+function showCustomRangeError(message) {
+    const errorEl = document.getElementById('customRangeError');
+    if (errorEl) {
+        errorEl.textContent = message;
+        safeClassList(errorEl, cl => cl.remove('hidden'));
     }
 }
 
@@ -256,9 +365,7 @@ function toggleCompareMode() {
 
     // Update toggle UI
     const toggleSwitch = document.getElementById('compareToggle');
-    if (toggleSwitch) {
-        toggleSwitch.classList.toggle('active', compareMode);
-    }
+    safeClassList(toggleSwitch, cl => cl.toggle('active', compareMode));
 
     // Re-render with compare mode
     if (dashboardData) {
@@ -697,7 +804,10 @@ document.addEventListener('DOMContentLoaded', () => {
     updateGreeting();
 
     $('syncBtn').addEventListener('click', handleSync);
-    $('closeModal').addEventListener('click', () => $('dayModal').classList.remove('open'));
+    const closeModalBtn = $('closeModal');
+    if (closeModalBtn) {
+        closeModalBtn.addEventListener('click', () => safeClassList($('dayModal'), cl => cl.remove('open')));
+    }
 
     // Init granular buttons state
     setPeriod(currentPeriod, false);
@@ -708,7 +818,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const rangePicker = document.createElement('div');
         rangePicker.className = 'range-picker';
         rangePicker.innerHTML = `
-            <span class="range-picker-label">Date Range:</span>
+            <span class="range-picker-label">Period:</span>
             <button class="range-btn" data-range="7d">7 Days</button>
             <button class="range-btn" data-range="30d">30 Days</button>
             <button class="range-btn" data-range="90d">90 Days</button>
@@ -727,6 +837,52 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Initialize range
         setRange(currentRange, false);
+    }
+
+    // Inject Custom Range Selector
+    if (periodToggle) {
+        const customRange = document.createElement('div');
+        customRange.className = 'custom-range-container';
+        customRange.innerHTML = `
+            <span class="custom-range-label">Custom range:</span>
+            <div class="custom-range-inputs">
+                <label class="custom-range-input-wrapper">
+                    <span class="custom-range-input-label">From</span>
+                    <input type="date" id="customFromDate" class="custom-range-input" />
+                </label>
+                <label class="custom-range-input-wrapper">
+                    <span class="custom-range-input-label">To</span>
+                    <input type="date" id="customToDate" class="custom-range-input" />
+                </label>
+                <button id="customRangeApply" class="btn-secondary custom-range-btn">Apply</button>
+                <button id="customRangeReset" class="btn-secondary custom-range-btn">Reset</button>
+            </div>
+            <div id="customRangeError" class="custom-range-error hidden"></div>
+        `;
+        const rangePickerEl = document.querySelector('.range-picker');
+        if (rangePickerEl) {
+            rangePickerEl.insertAdjacentElement('afterend', customRange);
+        }
+
+        // Bind custom range controls
+        const applyBtn = $('customRangeApply');
+        const resetBtn = $('customRangeReset');
+        const fromInput = $('customFromDate');
+        const toInput = $('customToDate');
+
+        if (applyBtn && fromInput && toInput) {
+            applyBtn.addEventListener('click', () => {
+                const from = fromInput.value;
+                const to = toInput.value;
+                setCustomRange(from, to);
+            });
+        }
+
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                resetToPresetRange();
+            });
+        }
     }
 
     // Inject Compare Mode Toggle
@@ -778,9 +934,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Close modal on outside click
-    $('dayModal').addEventListener('click', (e) => {
-        if (e.target.id === 'dayModal') $('dayModal').classList.remove('open');
-    });
+    const dayModalEl = $('dayModal');
+    if (dayModalEl) {
+        dayModalEl.addEventListener('click', (e) => {
+            if (e.target.id === 'dayModal') safeClassList($('dayModal'), cl => cl.remove('open'));
+        });
+    }
 
     loadDashboard();
     pollBackfillStatus();
@@ -796,9 +955,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if ('ontouchstart' in window && !kpiCard.classList.contains('tooltip-active')) {
                 // First tap shows tooltip
                 document.querySelectorAll('.kpi-card.tooltip-active').forEach(card => {
-                    card.classList.remove('tooltip-active');
+                    safeClassList(card, cl => cl.remove('tooltip-active'));
                 });
-                kpiCard.classList.add('tooltip-active');
+                safeClassList(kpiCard, cl => cl.add('tooltip-active'));
                 return;
             }
 
@@ -822,13 +981,14 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if ('ontouchstart' in window) {
             // Mobile: click outside - close all tooltips
             document.querySelectorAll('.kpi-card.tooltip-active').forEach(card => {
-                card.classList.remove('tooltip-active');
+                safeClassList(card, cl => cl.remove('tooltip-active'));
             });
         }
     });
 
     initDayInspector();
     initRepairRecentDays();
+    initSanityAutorun();
 });
 
 // Period toggle function
@@ -839,10 +999,10 @@ window.setPeriod = function (period, shouldRender = true) {
     // Update all period switchers (if multiple exist)
     document.querySelectorAll("[data-period]").forEach(btn => {
         if (btn.dataset.period === period) {
-            btn.classList.add("active");
+            safeClassList(btn, cl => cl.add("active"));
             btn.setAttribute("aria-pressed", "true");
         } else {
-            btn.classList.remove("active");
+            safeClassList(btn, cl => cl.remove("active"));
             btn.setAttribute("aria-pressed", "false");
         }
     });
@@ -864,18 +1024,18 @@ window.renderAll = function () {
 };
 
 window.switchTab = function (tabName) {
-    document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(el => safeClassList(el, cl => cl.remove('active')));
     const target = document.getElementById(`tab-${tabName}`);
-    if (target) target.classList.add('active');
+    safeClassList(target, cl => cl.add('active'));
 
     // Update desktop nav
     document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.tab === tabName);
+        safeClassList(btn, cl => cl.toggle('active', btn.dataset.tab === tabName));
     });
 
     // Update mobile nav
     document.querySelectorAll('.mobile-nav-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.tab === tabName);
+        safeClassList(btn, cl => cl.toggle('active', btn.dataset.tab === tabName));
     });
 
     // Resize charts if they are in the visible tab
@@ -1066,15 +1226,15 @@ async function loadDashboard() {
         if (authRes.status === 401) {
             const cs = $('connectSection');
             const ds = $('dashboardSection');
-            if (cs) cs.classList.remove('hidden');
-            if (ds) ds.classList.add('hidden');
+            safeClassList(cs, cl => cl.remove('hidden'));
+            safeClassList(ds, cl => cl.add('hidden'));
             return;
         }
 
         const cs = $('connectSection');
         const ds = $('dashboardSection');
-        if (cs) cs.classList.add('hidden');
-        if (ds) ds.classList.remove('hidden');
+        safeClassList(cs, cl => cl.add('hidden'));
+        safeClassList(ds, cl => cl.remove('hidden'));
 
         // 2. Fetch History (ensure enough for YTD)
         const historyDays = Math.max(60, getDaysSinceYearStartOslo());
@@ -1103,6 +1263,7 @@ async function loadDashboard() {
         renderSleepTab(data);
         renderRecoveryTab(data);
         renderActivityTab(data);
+        renderExportTab(data);
 
         // Update status
         if (series.length > 0) {
@@ -1134,19 +1295,100 @@ function renderCharts() {
         return;
     }
 
-    // Build labels and numeric arrays
-    const labels = rows.map(r => r.date);
-    const resting = rows.map(r => safeNumber(r.restingHr));
-    const sleep = rows.map(r => safeNumber(r.sleepMinutes));
-    const hrv = rows.map(r => safeNumber(r.hrv));
+    const buildRenderSeries = (rows, key) => {
+        if (currentPeriod !== 'daily') {
+            return {
+                series: rows.map(r => ({ date: r.date, value: safeNumber(r[key]), estimated: false })),
+                estimatedFlags: rows.map(() => false)
+            };
+        }
+        const real = rows
+            .map(r => ({ date: r.date, value: safeNumber(r[key]) }))
+            .filter(r => r.value !== null && r.value !== undefined);
+        if (real.length === 0) {
+            const series = rows.map(r => ({ date: r.date, value: safeNumber(r[key]), estimated: false }));
+            return { series, estimatedFlags: series.map(() => false) };
+        }
+        const startDate = real[0].date;
+        const endDate = real[real.length - 1].date;
+        const dateList = [];
+        let d = startDate;
+        while (d <= endDate) {
+            dateList.push(d);
+            d = addDaysISO(d, 1);
+        }
+        const map = new Map(real.map(r => [r.date, r.value]));
+        const series = [];
+        const flags = [];
+        const findPrev = (date) => {
+            let prevDate = addDaysISO(date, -1);
+            while (prevDate >= startDate) {
+                if (map.has(prevDate)) return { date: prevDate, value: map.get(prevDate) };
+                prevDate = addDaysISO(prevDate, -1);
+            }
+            return null;
+        };
+        const findNext = (date) => {
+            let nextDate = addDaysISO(date, 1);
+            while (nextDate <= endDate) {
+                if (map.has(nextDate)) return { date: nextDate, value: map.get(nextDate) };
+                nextDate = addDaysISO(nextDate, 1);
+            }
+            return null;
+        };
+
+        dateList.forEach(date => {
+            if (map.has(date)) {
+                series.push({ date, value: map.get(date), estimated: false });
+                flags.push(false);
+                return;
+            }
+            const prev = findPrev(date);
+            const next = findNext(date);
+            if (prev && next) {
+                const totalDays = (parseISOToUTC(next.date) - parseISOToUTC(prev.date)) / 86400000;
+                const daysFromPrev = (parseISOToUTC(date) - parseISOToUTC(prev.date)) / 86400000;
+                const val = prev.value + ((next.value - prev.value) * (daysFromPrev / totalDays));
+                series.push({ date, value: val, estimated: true });
+                flags.push(true);
+            } else if (prev && !next) {
+                // tail carry up to 2 days
+                const diff = (parseISOToUTC(date) - parseISOToUTC(prev.date)) / 86400000;
+                if (diff <= 2) {
+                    series.push({ date, value: prev.value, estimated: true });
+                    flags.push(true);
+                }
+            } else if (!prev && next) {
+                const diff = (parseISOToUTC(next.date) - parseISOToUTC(date)) / 86400000;
+                if (diff <= 2) {
+                    series.push({ date, value: next.value, estimated: true });
+                    flags.push(true);
+                }
+            }
+        });
+        return { series, estimatedFlags: flags };
+    };
+
+    const restingRender = buildRenderSeries(rows, 'restingHr');
+    const sleepRender = buildRenderSeries(rows, 'sleepMinutes');
+    const hrvRender = buildRenderSeries(rows, 'hrv');
+
+    const labels = restingRender.series.map(r => r.date);
+    const resting = restingRender.series.map(r => r.value);
+    const sleep = sleepRender.series.map(r => r.value);
+    const hrv = hrvRender.series.map(r => r.value);
 
     // Config
     Chart.defaults.font.family = "'Inter', sans-serif";
     Chart.defaults.color = '#666';
 
-    const ctxHR = $('chartHR').getContext('2d');
-    const ctxSleep = $('chartSleep').getContext('2d');
-    const ctxHRV = $('chartHRV').getContext('2d');
+    const chartHrEl = $('chartHR');
+    const chartSleepEl = $('chartSleep');
+    const chartHrvEl = $('chartHRV');
+    if (!chartHrEl || !chartSleepEl || !chartHrvEl) return;
+    const ctxHR = chartHrEl.getContext('2d');
+    const ctxSleep = chartSleepEl.getContext('2d');
+    const ctxHRV = chartHrvEl.getContext('2d');
 
     // Destroy existing if needed to resize or full reset
     if (charts.hr) charts.hr.destroy();
@@ -1175,25 +1417,32 @@ function renderCharts() {
                 fill: true,
                 pointRadius: isSinglePoint ? 6 : 4,
                 pointHoverRadius: 6,
-                showLine: !isSinglePoint
+                showLine: !isSinglePoint,
+                segment: {
+                    borderDash: ctx => (restingRender.estimatedFlags[ctx.p0DataIndex] || restingRender.estimatedFlags[ctx.p1DataIndex]) ? [6, 3] : undefined,
+                    borderColor: ctx => (restingRender.estimatedFlags[ctx.p0DataIndex] || restingRender.estimatedFlags[ctx.p1DataIndex]) ? 'rgba(239,68,68,0.6)' : '#ef4444'
+                },
+                pointBackgroundColor: ctx => restingRender.estimatedFlags[ctx.dataIndex] ? 'rgba(239,68,68,0.6)' : '#ef4444'
             }]
         },
-        options: createChartOptions('bpm', rows)
+        options: createChartOptions('bpm', restingRender.series, restingRender.estimatedFlags)
     });
 
     // 2. Sleep
+    const sleepHours = sleep.map(mins => mins ? (mins / 60).toFixed(1) : 0);
+    const sleepColors = sleepRender.estimatedFlags.map(flag => flag ? 'rgba(59, 130, 246, 0.4)' : '#3b82f6');
     charts.sleep = new Chart(ctxSleep, {
         type: 'bar',
         data: {
             labels: displayLabels,
             datasets: [{
                 label: 'Sleep Hours',
-                data: sleep.map(mins => mins ? (mins / 60).toFixed(1) : 0),
-                backgroundColor: '#3b82f6',
+                data: sleepHours,
+                backgroundColor: sleepColors,
                 borderRadius: 4
             }]
         },
-        options: createChartOptions('hrs', rows)
+        options: createChartOptions('hrs', sleepRender.series, sleepRender.estimatedFlags)
     });
 
     // 3. HRV
@@ -1210,14 +1459,36 @@ function renderCharts() {
                 fill: true,
                 pointRadius: isSinglePoint ? 6 : 4,
                 pointHoverRadius: 6,
-                showLine: !isSinglePoint
+                showLine: !isSinglePoint,
+                segment: {
+                    borderDash: ctx => (hrvRender.estimatedFlags[ctx.p0DataIndex] || hrvRender.estimatedFlags[ctx.p1DataIndex]) ? [6, 3] : undefined,
+                    borderColor: ctx => (hrvRender.estimatedFlags[ctx.p0DataIndex] || hrvRender.estimatedFlags[ctx.p1DataIndex]) ? 'rgba(16,185,129,0.6)' : '#10b981'
+                },
+                pointBackgroundColor: ctx => hrvRender.estimatedFlags[ctx.dataIndex] ? 'rgba(16,185,129,0.6)' : '#10b981'
             }]
         },
-        options: createChartOptions('ms', rows)
+        options: createChartOptions('ms', hrvRender.series, hrvRender.estimatedFlags)
     });
+
+    const hasEst = {
+        hr: restingRender.estimatedFlags.some(Boolean),
+        sleep: sleepRender.estimatedFlags.some(Boolean),
+        hrv: hrvRender.estimatedFlags.some(Boolean)
+    };
+    chartHrEl.dataset.estimated = hasEst.hr ? '1' : '0';
+    chartSleepEl.dataset.estimated = hasEst.sleep ? '1' : '0';
+    chartHrvEl.dataset.estimated = hasEst.hrv ? '1' : '0';
+
+    window._estMeta = hasEst;
+    window._estFlags = {
+        hr: restingRender.estimatedFlags,
+        sleep: sleepRender.estimatedFlags,
+        hrv: hrvRender.estimatedFlags
+    };
+    window._charts = charts;
 }
 
-function createChartOptions(unit, fullData) {
+function createChartOptions(unit, fullData, estimatedFlags = []) {
     return {
         responsive: true,
         maintainAspectRatio: false,
@@ -1230,7 +1501,9 @@ function createChartOptions(unit, fullData) {
                     label: (ctx) => {
                         const val = ctx.raw;
                         if (val === null || val === undefined) return null;
-                        return `${ctx.dataset.label}: ${Number(val).toFixed(1)} ${unit}`;
+                        const isEst = estimatedFlags && estimatedFlags[ctx.dataIndex];
+                        const prefix = isEst ? 'Estimated ' : '';
+                        return `${prefix}${ctx.dataset.label}: ${Number(val).toFixed(1)} ${unit}`;
                     }
                 }
             }
@@ -1255,7 +1528,7 @@ async function showDayDetails(date) {
         const container = $('modalMetrics');
         container.innerHTML = '<div class="metric-box">Loading...</div>';
 
-        $('dayModal').classList.add('open');
+    safeClassList($('dayModal'), cl => cl.add('open'));
 
         const res = await fetch(`/api/day?date=${date}`);
         if (!res.ok) throw new Error('Could not fetch details');
@@ -1301,7 +1574,7 @@ async function handleSync() {
 
     try {
         btn.disabled = true;
-        txt.classList.add('spin'); // simplistic animation class if we added it, or just text
+        safeClassList(txt, cl => cl.add('spin')); // simplistic animation class if we added it, or just text
         btn.textContent = 'Syncing...';
 
         const res = await fetch('/api/sync', { method: 'POST' });
@@ -1408,10 +1681,10 @@ function renderBackfillCard(data) {
         const { plan, progress, estimatedRemainingDays, lastUpdatedAt, authStatus } = data;
 
         if (!plan && !progress) {
-            card.classList.add('hidden');
+        safeClassList(card, cl => cl.add('hidden'));
             return;
         }
-        card.classList.remove('hidden');
+        safeClassList(card, cl => cl.remove('hidden'));
 
         // Mappings
         const isRunning = progress?.running;
@@ -1592,7 +1865,7 @@ function renderBackfillCard(data) {
         // Error Section
         const errSec = $('bf-error-section');
         if (hasFailed) {
-            errSec.classList.remove('hidden');
+            safeClassList(errSec, cl => cl.remove('hidden'));
             const err = failedDays[0];
             $('bf-error-type').textContent = err.errorType || "unknown";
             $('bf-error-msg').textContent = err.errorMessage || "--";
@@ -1601,14 +1874,14 @@ function renderBackfillCard(data) {
 
             // Explicit Rate Limit / Retry Status Line
             if (err.nextRetryAt && new Date(err.nextRetryAt) > new Date()) {
-                if (retryRow) retryRow.classList.remove('hidden');
+                safeClassList(retryRow, cl => cl.remove('hidden'));
                 const nextRetryEl = $('bf-next-retry');
                 if (nextRetryEl) nextRetryEl.textContent = fmtLocalWithAge(progress?.failedDays?.[0]?.nextRetryAt);
             } else {
-                if (retryRow) retryRow.classList.add('hidden');
+                safeClassList(retryRow, cl => cl.add('hidden'));
             }
         } else {
-            if (errSec) errSec.classList.add('hidden');
+            safeClassList(errSec, cl => cl.add('hidden'));
         }
 
         // Raw Debug
@@ -1814,9 +2087,12 @@ function renderKPIs(data) {
     const headerHtml = `
         <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items:center;">
              <span style="font-size:0.85rem; font-weight:600; color:var(--text-main);">${dateRangeStr}</span>
-             <span class="badge ${coverageVal < 50 ? 'badge-strained' : 'badge-neutral'}" style="font-weight: 500; font-size: 0.75rem;">
+             <span data-testid="coverage-badge" class="badge ${coverageVal < 50 ? 'badge-strained' : 'badge-neutral'}" style="font-weight: 500; font-size: 0.75rem;">
                 Coverage: ${coverageVal}%
             </span>
+        </div>
+        <div data-testid="coverage-help" style="grid-column: 1 / -1; margin-top:-0.25rem; margin-bottom:0.75rem; font-size:0.75rem; color:var(--text-secondary);">
+            Coverage shows how many days in the selected period include complete sleep and recovery related metrics. Missing values are expected if the device was not worn or sleep was not recorded.
         </div>
     `;
 
@@ -2105,6 +2381,14 @@ function renderActivityTab(data) {
     const steps = safeNumber(last.steps) || 0;
     const cals = safeNumber(last.caloriesOut) || 0;
     const azm = safeNumber(last.azm) || 0;
+    let azmDays = 0;
+    if (currentPeriod === 'daily') {
+        azmDays = Array.isArray(data.series)
+            ? data.series.filter(d => safeNumber(d.azm) !== null).length
+            : 0;
+    } else {
+        azmDays = last.days || 0;
+    }
 
     // Coverage
     const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
@@ -2132,7 +2416,7 @@ function renderActivityTab(data) {
         }
     }
 
-    const hasAzm = azmDays > 0;
+    const hasAzm = (azmDays || 0) > 0;
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
@@ -2180,7 +2464,7 @@ function renderActivityTab(data) {
     }
 
     if (currentPeriod !== 'daily') {
-        chartCard.classList.add('hidden');
+        safeClassList(chartCard, cl => cl.add('hidden'));
         if (charts.activity) {
             charts.activity.destroy();
             charts.activity = null;
@@ -2188,7 +2472,7 @@ function renderActivityTab(data) {
         return;
     }
 
-    chartCard.classList.remove('hidden');
+    safeClassList(chartCard, cl => cl.remove('hidden'));
     const canvas = chartCard.querySelector('#chartSteps');
     if (!canvas) return;
 
@@ -2258,6 +2542,11 @@ function renderExportTab(data) {
 
     // Bind event
     const btn = document.getElementById('btn-export-view');
+    const rawStatus = document.createElement('div');
+    rawStatus.id = 'exportRawStatus';
+    rawStatus.className = 'text-xs';
+    rawStatus.style.color = 'var(--text-secondary)';
+    rawStatus.style.marginTop = '0.25rem';
     if (btn) {
         btn.onclick = () => {
             if (rows.length === 0) {
@@ -2265,6 +2554,33 @@ function renderExportTab(data) {
                 return;
             }
             downloadCSV(rows, `fitbit_export_${currentPeriod}_${new Date().toISOString().slice(0, 10)}.csv`);
+        };
+    }
+
+    // Inject raw export button
+    const currentViewDiv = btn ? btn.parentElement : null;
+    if (currentViewDiv) {
+        const rawBtn = document.createElement('button');
+        rawBtn.id = 'btn-export-raw';
+        rawBtn.className = 'btn-secondary';
+        rawBtn.textContent = 'Export raw data (JSON)';
+        rawBtn.style.marginTop = '0.75rem';
+        currentViewDiv.appendChild(rawBtn);
+        currentViewDiv.appendChild(rawStatus);
+
+        rawBtn.onclick = () => {
+            rawStatus.textContent = '';
+            const filtered = getFilteredDashboardData();
+            if (!filtered || !filtered.series || filtered.series.length === 0) {
+                rawStatus.textContent = 'Load data for this period first.';
+                return;
+            }
+            const start = rangeStartDate || filtered.series[0].date || 'unknown';
+            const end = rangeEndDate || filtered.series[filtered.series.length - 1].date || 'unknown';
+            const filename = `fitbit-raw-${start}_to_${end}.json`;
+            downloadJSON(filtered.series, filename);
+            rawStatus.textContent = `Downloaded ${filename}`;
+            window.__LAST_DOWNLOAD__ = filename;
         };
     }
 }
@@ -2301,6 +2617,19 @@ function downloadCSV(data, filename) {
         link.click();
         document.body.removeChild(link);
     }
+}
+
+function downloadJSON(data, filename) {
+    if (!data) return;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
 }
 
 // --- Day Inspector ---
@@ -2468,9 +2797,9 @@ async function loadDayInspect(date) {
     const loadingDiv = $('inspectLoading');
     const errorDiv = $('inspectError');
 
-    resultDiv.classList.add('hidden');
-    errorDiv.classList.add('hidden');
-    loadingDiv.classList.remove('hidden');
+    safeClassList(resultDiv, cl => cl.add('hidden'));
+    safeClassList(errorDiv, cl => cl.add('hidden'));
+    safeClassList(loadingDiv, cl => cl.remove('hidden'));
     resultDiv.innerHTML = '';
 
     try {
@@ -2478,11 +2807,11 @@ async function loadDayInspect(date) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        loadingDiv.classList.add('hidden');
+        safeClassList(loadingDiv, cl => cl.add('hidden'));
 
         if (!data || !data.metrics) {
             errorDiv.textContent = 'No data found for this date.';
-            errorDiv.classList.remove('hidden');
+            safeClassList(errorDiv, cl => cl.remove('hidden'));
             return;
         }
 
@@ -2506,12 +2835,41 @@ async function loadDayInspect(date) {
             </div>
         `).join('');
 
-        resultDiv.classList.remove('hidden');
+        safeClassList(resultDiv, cl => cl.remove('hidden'));
 
     } catch (e) {
         console.error(e);
-        loadingDiv.classList.add('hidden');
+        safeClassList(loadingDiv, cl => cl.add('hidden'));
         errorDiv.textContent = 'Failed to load data: ' + e.message;
-        errorDiv.classList.remove('hidden');
+        safeClassList(errorDiv, cl => cl.remove('hidden'));
     }
+}
+
+function initSanityAutorun() {
+    const params = new URLSearchParams(window.location.search || '');
+    if (params.get('autorunSanity') !== '1') return;
+
+    const start = performance.now();
+    let errorCount = 0;
+    const originalConsoleError = console.error;
+    console.error = (...args) => {
+        errorCount++;
+        originalConsoleError.apply(console, args);
+    };
+    const onRuntimeError = () => { errorCount++; };
+    window.addEventListener('error', onRuntimeError);
+    window.addEventListener('unhandledrejection', onRuntimeError);
+
+    const finish = () => {
+        const ms = Math.round(performance.now() - start);
+        const ok = errorCount === 0 ? 1 : 0;
+        window.SANITY_DONE = true;
+        document.documentElement.dataset.sanityDone = "1";
+        console.log(`[sanity] done ok=${ok} errors=${errorCount} ms=${ms}`);
+        window.removeEventListener('error', onRuntimeError);
+        window.removeEventListener('unhandledrejection', onRuntimeError);
+        console.error = originalConsoleError;
+    };
+
+    waitForElement('#syncBtn', 15000).then(finish).catch(finish);
 }
