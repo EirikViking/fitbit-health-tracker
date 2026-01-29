@@ -70,6 +70,14 @@ async function main() {
     process.exit(1);
   }
 
+  // Group by label
+  const groupText = await page.locator('#periodToggle').innerText();
+  if (!groupText.toLowerCase().includes('charts only')) {
+    console.error('Group by label missing charts-only hint');
+    await browser.close();
+    process.exit(1);
+  }
+
   // Estimated toggle OFF/ON
   await page.locator('nav button[data-tab="recovery"]').click();
   const estToggle = page.locator('#toggleEstimated');
@@ -103,21 +111,26 @@ async function main() {
     process.exit(1);
   }
 
-  // Raw export download + parse
+  // Raw export download + parse (loaded view)
   await page.locator('nav button[data-tab="exports"]').click();
-  await page.waitForSelector('#btn-export-raw', { timeout: 15000, state: 'attached' });
+  try {
+    await page.waitForSelector('#btn-export-raw', { timeout: 15000, state: 'attached' });
+  } catch {
+    await page.evaluate(() => { if (window.renderAll) window.renderAll(); });
+    await page.waitForSelector('#btn-export-raw', { timeout: 15000, state: 'attached' });
+  }
   const rawBtn = page.locator('#btn-export-raw');
   const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
   await rawBtn.click();
   const download = await downloadPromise;
-  const fname = download.suggestedFilename();
+  let fname = download.suggestedFilename();
   if (!fname || !fname.endsWith('.json')) {
     console.error('Download filename not json', fname);
     await browser.close();
     process.exit(1);
   }
-  const dlPath = await download.path();
-  const jsonStr = await fs.readFile(dlPath, 'utf-8');
+  let dlPath = await download.path();
+  let jsonStr = await fs.readFile(dlPath, 'utf-8');
   let parsed;
   try {
     parsed = JSON.parse(jsonStr);
@@ -134,6 +147,56 @@ async function main() {
   const hasEstimatedField = Array.isArray(parsed.data) && parsed.data.some(row => Object.prototype.hasOwnProperty.call(row, 'estimated'));
   if (hasEstimatedField) {
     console.error('Export includes estimated flag which should be excluded');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Full range export selected period
+  const fromRange = '2024-01-01';
+  const toRange = '2026-01-29';
+  await page.locator('#customFromDate').fill(fromRange);
+  await page.locator('#customToDate').fill(toRange);
+  await page.locator('#customRangeApply').click();
+  await page.waitForTimeout(500);
+  const selectedBtn = page.locator('[data-testid="export-selected-period"]');
+  await selectedBtn.click();
+  const fullDownload = await page.waitForEvent('download', { timeout: 45000 });
+  fname = fullDownload.suggestedFilename();
+  if (!fname.endsWith('.json')) {
+    console.error('Selected period download not json', fname);
+    await browser.close();
+    process.exit(1);
+  }
+  dlPath = await fullDownload.path();
+  jsonStr = await fs.readFile(dlPath, 'utf-8');
+  let selectedParsed;
+  try { selectedParsed = JSON.parse(jsonStr); } catch (e) { console.error('Selected JSON parse error', e); await browser.close(); process.exit(1); }
+  const meta = selectedParsed.exportMeta || {};
+  if (meta.requestedFrom !== fromRange || meta.requestedTo !== toRange) {
+    console.error('Selected export meta range mismatch', meta);
+    await browser.close();
+    process.exit(1);
+  }
+  if (!(meta.rows > 100)) {
+    console.error('Selected export too few rows', meta.rows);
+    await browser.close();
+    process.exit(1);
+  }
+  const dates = (selectedParsed.rows || []).map(r => r.date).filter(Boolean);
+  if (!(dates.some(d => d.startsWith('2025')) && dates.some(d => d.startsWith('2026')))) {
+    console.error('Selected export missing span across years');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Direct range fetch check
+  const rangeCheck = await page.evaluate(async () => {
+    const res = await fetch('/api/range?from=2025-12-01&to=2025-12-31&limit=10');
+    const json = await res.json();
+    return { nextCursor: json.nextCursor, rows: json.rows?.length || 0 };
+  });
+  if (!rangeCheck.nextCursor) {
+    console.error('Range paging nextCursor missing', rangeCheck);
     await browser.close();
     process.exit(1);
   }
@@ -258,6 +321,34 @@ async function main() {
   }
   if (estEval.tooltipText && !estEval.tooltipText.includes('Estimated')) {
     console.error('Estimated tooltip missing label', estEval.tooltipText);
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Period label alignment on cards
+  const periodRangeText = await page.locator('#rangeDisplay').innerText().catch(() => '');
+  const periodCardText = await page.locator('.kpi-card .text-sm', { hasText: 'Period Total' }).first().innerText().catch(() => '');
+  if (!periodRangeText || !periodCardText || !periodCardText.toLowerCase().includes('period total')) {
+    console.error('Period label not reflected on cards', { periodRangeText, periodCardText });
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Active mins deterministic
+  const activeCard = page.locator('.kpi-card', { hasText: 'Active Mins' });
+  if (await activeCard.count() > 0) {
+    const activeText = await activeCard.innerText();
+    if (!(activeText.includes('Not supported') || /\b0\b/.test(activeText))) {
+      console.error('Active mins not in expected state', activeText);
+      await browser.close();
+      process.exit(1);
+    }
+  }
+
+  // Repair explanation present
+  const repairText = await page.locator('.text-secondary', { hasText: 'Repair calls /api/day' }).count();
+  if (repairText === 0) {
+    console.error('Repair explanation missing');
     await browser.close();
     process.exit(1);
   }

@@ -1532,6 +1532,12 @@ function createChartOptions(unit, fullData, estimatedFlags = []) {
         spanGaps: !showEstimated
     };
 }
+
+function getPeriodLabel() {
+    const display = document.getElementById('rangeDisplay');
+    const txt = display?.textContent;
+    return txt && txt.trim() ? txt.trim() : (currentRange || 'Period');
+}
 // Fetch single day details
 async function showDayDetails(date) {
     try {
@@ -1913,8 +1919,9 @@ function getRepairBtnHtml(repairState) {
     if (!repairState) {
         return `
         <div style="margin-top:1.5rem; text-align:center;">
+            <div class="text-xs text-secondary" style="margin-bottom:0.5rem;">Repair calls /api/day to keep data fresh and fix stuck zeros, even after backfill is done.</div>
             <button class="btn-secondary repair-btn-action" style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
-                Repair recent gaps (last 60d)
+                Repair
             </button>
         </div>
         `;
@@ -1928,6 +1935,7 @@ function getRepairBtnHtml(repairState) {
             <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:0.5rem;">
                 Repair: ${repairState.remainingDays} days remaining. Next run: ${nextRunStr}
             </div>
+            <div class="text-xs text-secondary" style="margin-bottom:0.5rem;">Repair calls /api/day to keep data fresh and fix stuck zeros, even after backfill is done.</div>
             <button class="btn-secondary repair-btn-action" disabled style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
                 Automation running...
             </button>
@@ -1937,8 +1945,9 @@ function getRepairBtnHtml(repairState) {
 
     return `
     <div style="margin-top:1.5rem; text-align:center;">
+        <div class="text-xs text-secondary" style="margin-bottom:0.5rem;">Repair calls /api/day to keep data fresh and fix stuck zeros, even after backfill is done.</div>
         <button class="btn-secondary repair-btn-action" style="font-size:0.75rem; color:var(--text-secondary); border:1px solid #eee;">
-            Repair recent gaps (last 60d)
+            Repair
         </button>
     </div>
     `;
@@ -1986,7 +1995,7 @@ function renderKPIs(data) {
     const kpiGrid = $('overviewKPIs');
     if (!kpiGrid || !data) return;
 
-    const rows = normalizeForPeriod(data, currentPeriod) || [];
+    const rows = normalizeForPeriod(data, 'daily') || [];
     if (rows.length === 0) {
         kpiGrid.innerHTML = '<p style="grid-column:1/-1;color:var(--text-secondary);">No data available for insights.</p>';
         return;
@@ -2405,25 +2414,21 @@ function renderActivityTab(data) {
     const container = $('activityMetrics');
     if (!container || !data) return;
     const rows = normalizeForPeriod(data, currentPeriod) || [];
-    if (rows.length === 0) return;
+    const dailyRows = normalizeForPeriod(data, 'daily') || [];
+    if (rows.length === 0 || dailyRows.length === 0) return;
 
-    const last = rows[rows.length - 1];
-
-    const count = last.days || 1;
-    const steps = safeNumber(last.steps) || 0;
-    const cals = safeNumber(last.caloriesOut) || 0;
-    const azm = safeNumber(last.azm) || 0;
-    let azmDays = 0;
-    if (currentPeriod === 'daily') {
-        azmDays = Array.isArray(data.series)
-            ? data.series.filter(d => safeNumber(d.azm) !== null).length
-            : 0;
-    } else {
-        azmDays = last.days || 0;
-    }
+    const count = dailyRows.length;
+    const steps = dailyRows.reduce((sum, r) => sum + (safeNumber(r.steps) || 0), 0);
+    const cals = dailyRows.reduce((sum, r) => sum + (safeNumber(r.caloriesOut) || 0), 0);
+    const azm = dailyRows.reduce((sum, r) => sum + (safeNumber(r.azm) || 0), 0);
+    const azmNonNull = dailyRows.filter(r => safeNumber(r.azm) !== null);
+    const azmDays = azmNonNull.length;
+    const azmHasData = azmNonNull.some(r => safeNumber(r.azm) > 0);
+    const hasSignals = steps > 0 || cals > 0;
 
     // Coverage
-    const dayLabel = currentPeriod === 'daily' ? '1d' : `${last.days || 0} of ${last.expectedDays || 1}`;
+    const dayLabel = `${count}d`;
+    const periodLabel = document.getElementById('rangeDisplay')?.textContent || currentRange.toUpperCase();
     const repairHtml = getRepairBtnHtml(repairState);
 
     // Find best/worst activity days (only for daily view)
@@ -2456,24 +2461,31 @@ function renderActivityTab(data) {
                  <div class="text-xs text-secondary">Data days: ${dayLabel}</div>
             </div>
             <div class="kpi-value">${(steps / 1000).toFixed(1)}k</div>
-            <div class="text-sm">Period Total (${count}d)</div>
+            <div class="text-sm">Period Total (${periodLabel})</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(steps / count).toLocaleString()}/day</div>` : ''}
             ${createTooltip('steps')}
         </div>
         <div class="kpi-card">
             <div class="kpi-title">Calories</div>
             <div class="kpi-value">${(cals / 1000).toFixed(1)}k</div>
-            <div class="text-sm">Period Total</div>
+            <div class="text-sm">Period Total (${periodLabel})</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(cals / count).toLocaleString()}/day</div>` : ''}
             ${createTooltip('calories')}
         </div>
+        ${azmHasData || !hasSignals ? `
         <div class="kpi-card">
             <div class="kpi-title">Active Mins</div>
             <div class="kpi-value">${azm}</div>
-            <div class="text-sm">Period Total (AZM)</div>
+            <div class="text-sm">Period Total (${periodLabel})</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
             ${createTooltip('azm')}
-        </div>
+        </div>` : `
+        <div class="kpi-card">
+            <div class="kpi-title">Active Mins</div>
+            <div class="kpi-value">Not supported by Fitbit Web API for this account</div>
+            <div class="text-sm">Period Total (${periodLabel})</div>
+            ${createTooltip('azm')}
+        </div>`}
         ${highlightsHtml}
         <div style="grid-column:1/-1">
            ${repairHtml}
@@ -2595,7 +2607,8 @@ function renderExportTab(data) {
         const rawBtn = document.createElement('button');
         rawBtn.id = 'btn-export-raw';
         rawBtn.className = 'btn-secondary';
-        rawBtn.textContent = 'Export raw data (JSON)';
+        rawBtn.textContent = 'Export loaded view';
+        rawBtn.setAttribute('data-testid', 'export-loaded-view');
         rawBtn.style.marginTop = '0.75rem';
         const rawExplainer = document.createElement('div');
         rawExplainer.className = 'text-xs';
@@ -2626,6 +2639,92 @@ function renderExportTab(data) {
             downloadJSON(exportPayload, filename);
             rawStatus.textContent = `Downloaded ${filename}`;
             window.__LAST_DOWNLOAD__ = filename;
+        };
+
+        // New: Export selected period (paged)
+        const selectedBtn = document.createElement('button');
+        selectedBtn.className = 'btn';
+        selectedBtn.textContent = 'Export selected period';
+        selectedBtn.setAttribute('data-testid', 'export-selected-period');
+        selectedBtn.style.marginTop = '0.75rem';
+
+        const progress = document.createElement('div');
+        progress.id = 'exportSelectedProgress';
+        progress.setAttribute('data-testid', 'export-progress');
+        progress.className = 'text-xs';
+        progress.style.color = 'var(--text-secondary)';
+        progress.style.marginTop = '0.35rem';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel export';
+        cancelBtn.className = 'btn-secondary';
+        cancelBtn.style.marginTop = '0.35rem';
+        cancelBtn.style.display = 'none';
+        cancelBtn.setAttribute('data-testid', 'export-cancel');
+
+        currentViewDiv.appendChild(selectedBtn);
+        currentViewDiv.appendChild(cancelBtn);
+        currentViewDiv.appendChild(progress);
+
+        selectedBtn.onclick = async () => {
+            progress.textContent = '';
+            let from = rangeStartDate;
+            let to = rangeEndDate;
+            const series = dashboardData?.series || [];
+            if (!from && series.length) from = series[0].date;
+            if (!to && series.length) to = series[series.length - 1].date;
+            if (!from || !to) {
+                showToast('Select a period first', 'error');
+                return;
+            }
+            const expected = daysBetweenInclusive(from, to);
+            let cursor = null;
+            let rows = [];
+            let cancelled = false;
+            cancelBtn.style.display = 'inline-block';
+            cancelBtn.onclick = () => { cancelled = true; };
+            try {
+                while (true) {
+                    if (cancelled) throw new Error('cancelled');
+                    const url = new URL('/api/range', window.location.origin);
+                    url.searchParams.set('from', from);
+                    url.searchParams.set('to', to);
+                    url.searchParams.set('limit', '500');
+                    if (cursor) url.searchParams.set('cursor', cursor);
+                    const res = await fetch(url.toString());
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const json = await res.json();
+                    rows = rows.concat(json.rows || []);
+                    cursor = json.nextCursor;
+                    progress.textContent = `Fetched ${rows.length} / ${expected} days`;
+                    await sleep(0);
+                    if (!cursor) break;
+                }
+                const payload = {
+                    exportMeta: {
+                        requestedFrom: from,
+                        requestedTo: to,
+                        exportedFrom: rows[0]?.date || null,
+                        exportedTo: rows[rows.length - 1]?.date || null,
+                        rows: rows.length,
+                        generatedAt: new Date().toISOString(),
+                        source: 'D1 range paging'
+                    },
+                    rows
+                };
+                const filename = `fitbit-range-${from}_to_${to}.json`;
+                downloadJSON(payload, filename);
+                window.__LAST_DOWNLOAD__ = filename;
+                progress.textContent = `Downloaded ${filename}`;
+            } catch (e) {
+                if (e.message === 'cancelled') {
+                    progress.textContent = 'Cancelled';
+                } else {
+                    progress.textContent = `Error: ${e.message || e}`;
+                }
+            } finally {
+                cancelBtn.style.display = 'none';
+            }
         };
     }
 }

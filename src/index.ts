@@ -141,6 +141,7 @@ export default {
             if (url.pathname === "/api/activity/timeseries") return handleActivityTimeSeries(request, env);
             if (url.pathname === "/api/hrv/today") return handleHRVToday(request, env);
             if (url.pathname === "/api/catalog") return handleCatalog(request, env);
+            if (url.pathname === "/api/range") return handleRange(request, env);
 
             // Repair
             if (url.pathname === "/api/repair/recent") return handleRepairRecent(request, env);
@@ -1992,6 +1993,73 @@ async function handleHistory(req: Request, env: Env): Promise<Response> {
 
     (responseData as any).cached = false;
     return jsonResponse(env, responseData);
+}
+
+async function handleRange(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+    const url = new URL(req.url);
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
+    const cursor = url.searchParams.get("cursor");
+    const limitRaw = url.searchParams.get("limit") || "500";
+    const maxLimit = 1000;
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+
+    const bad = (msg: string) => new Response(msg, { status: 400 });
+    if (!from || !to) return bad("from and to are required");
+    if (!iso.test(from) || !iso.test(to)) return bad("from/to must be ISO YYYY-MM-DD");
+    if (from > to) return bad("from must be <= to");
+    if (cursor && !iso.test(cursor)) return bad("cursor must be ISO YYYY-MM-DD");
+
+    const limit = parseInt(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > maxLimit) return bad("limit out of range");
+
+    const params: any[] = [from, to];
+    let sql = "SELECT date, resting_hr, hrv_rmssd, sleep_minutes, steps, calories_out, distance_km, azm FROM daily_metrics WHERE date >= ? AND date <= ?";
+    if (cursor) {
+        sql += " AND date > ?";
+        params.push(cursor);
+    }
+    sql += " ORDER BY date ASC LIMIT ?";
+    params.push(limit);
+
+    const { results } = await env.FITBIT_DB.prepare(sql).bind(...params).all();
+    const rows = (results || []).map((r: any) => {
+        const sanitized = sanitizeDailyMetrics(r.date, {
+            steps: r.steps,
+            caloriesOut: r.calories_out,
+            distanceKm: r.distance_km,
+            azm: r.azm,
+            restingHr: r.resting_hr,
+            hrvRmssd: r.hrv_rmssd,
+            sleepMinutes: r.sleep_minutes
+        });
+        return {
+            date: r.date,
+            restingHr: sanitized.restingHr,
+            hrv: sanitized.hrvRmssd,
+            sleepMinutes: sanitized.sleepMinutes,
+            steps: sanitized.steps,
+            caloriesOut: sanitized.caloriesOut,
+            distanceKm: sanitized.distanceKm,
+            azm: sanitized.azm
+        };
+    });
+
+    const nextCursor = rows.length === limit ? rows[rows.length - 1].date : null;
+
+    return jsonResponse(env, {
+        from,
+        to,
+        limit,
+        cursor: cursor || null,
+        nextCursor,
+        rows,
+        meta: {
+            source: "D1",
+            rowCount: rows.length
+        }
+    });
 }
 
 async function handleDay(req: Request, env: Env): Promise<Response> {
