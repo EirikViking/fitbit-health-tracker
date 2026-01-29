@@ -5,6 +5,7 @@ let dashboardData = null;
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
 let viewMode = 'calendar';
 let repairState = null;
+let showEstimated = localStorage.getItem('fitbit_show_estimated') !== 'false'; // default ON
 let currentRange = localStorage.getItem('fitbit_range') || 'all'; // 7d, 30d, 90d, ytd, all, custom
 let rangeStartDate = null;
 let rangeEndDate = null;
@@ -989,6 +990,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initDayInspector();
     initRepairRecentDays();
     initSanityAutorun();
+    initEstimatedToggle();
 });
 
 // Period toggle function
@@ -1374,9 +1376,13 @@ function renderCharts() {
     const hrvRender = buildRenderSeries(rows, 'hrv');
 
     const labels = restingRender.series.map(r => r.date);
-    const resting = restingRender.series.map(r => r.value);
-    const sleep = sleepRender.series.map(r => r.value);
-    const hrv = hrvRender.series.map(r => r.value);
+    const projectSeries = (render) => render.series.map((pt, idx) => {
+        if (!showEstimated && render.estimatedFlags[idx]) return null;
+        return pt.value;
+    });
+    const resting = projectSeries(restingRender);
+    const sleep = projectSeries(sleepRender);
+    const hrv = projectSeries(hrvRender);
 
     // Config
     Chart.defaults.font.family = "'Inter', sans-serif";
@@ -1419,18 +1425,18 @@ function renderCharts() {
                 pointHoverRadius: 6,
                 showLine: !isSinglePoint,
                 segment: {
-                    borderDash: ctx => (restingRender.estimatedFlags[ctx.p0DataIndex] || restingRender.estimatedFlags[ctx.p1DataIndex]) ? [6, 3] : undefined,
-                    borderColor: ctx => (restingRender.estimatedFlags[ctx.p0DataIndex] || restingRender.estimatedFlags[ctx.p1DataIndex]) ? 'rgba(239,68,68,0.6)' : '#ef4444'
+                    borderDash: ctx => (showEstimated && (restingRender.estimatedFlags[ctx.p0DataIndex] || restingRender.estimatedFlags[ctx.p1DataIndex])) ? [6, 3] : undefined,
+                    borderColor: ctx => (showEstimated && (restingRender.estimatedFlags[ctx.p0DataIndex] || restingRender.estimatedFlags[ctx.p1DataIndex])) ? 'rgba(239,68,68,0.6)' : '#ef4444'
                 },
-                pointBackgroundColor: ctx => restingRender.estimatedFlags[ctx.dataIndex] ? 'rgba(239,68,68,0.6)' : '#ef4444'
+                pointBackgroundColor: ctx => (showEstimated && restingRender.estimatedFlags[ctx.dataIndex]) ? 'rgba(239,68,68,0.6)' : '#ef4444'
             }]
         },
         options: createChartOptions('bpm', restingRender.series, restingRender.estimatedFlags)
     });
 
     // 2. Sleep
-    const sleepHours = sleep.map(mins => mins ? (mins / 60).toFixed(1) : 0);
-    const sleepColors = sleepRender.estimatedFlags.map(flag => flag ? 'rgba(59, 130, 246, 0.4)' : '#3b82f6');
+    const sleepHours = sleep.map(mins => mins === null ? null : (mins ? (mins / 60).toFixed(1) : 0));
+    const sleepColors = sleepRender.estimatedFlags.map(flag => (!showEstimated && flag) ? 'rgba(59,130,246,0)' : (flag ? 'rgba(59, 130, 246, 0.4)' : '#3b82f6'));
     charts.sleep = new Chart(ctxSleep, {
         type: 'bar',
         data: {
@@ -1461,10 +1467,10 @@ function renderCharts() {
                 pointHoverRadius: 6,
                 showLine: !isSinglePoint,
                 segment: {
-                    borderDash: ctx => (hrvRender.estimatedFlags[ctx.p0DataIndex] || hrvRender.estimatedFlags[ctx.p1DataIndex]) ? [6, 3] : undefined,
-                    borderColor: ctx => (hrvRender.estimatedFlags[ctx.p0DataIndex] || hrvRender.estimatedFlags[ctx.p1DataIndex]) ? 'rgba(16,185,129,0.6)' : '#10b981'
+                    borderDash: ctx => (showEstimated && (hrvRender.estimatedFlags[ctx.p0DataIndex] || hrvRender.estimatedFlags[ctx.p1DataIndex])) ? [6, 3] : undefined,
+                    borderColor: ctx => (showEstimated && (hrvRender.estimatedFlags[ctx.p0DataIndex] || hrvRender.estimatedFlags[ctx.p1DataIndex])) ? 'rgba(16,185,129,0.6)' : '#10b981'
                 },
-                pointBackgroundColor: ctx => hrvRender.estimatedFlags[ctx.dataIndex] ? 'rgba(16,185,129,0.6)' : '#10b981'
+                pointBackgroundColor: ctx => (showEstimated && hrvRender.estimatedFlags[ctx.dataIndex]) ? 'rgba(16,185,129,0.6)' : '#10b981'
             }]
         },
         options: createChartOptions('ms', hrvRender.series, hrvRender.estimatedFlags)
@@ -1478,6 +1484,9 @@ function renderCharts() {
     chartHrEl.dataset.estimated = hasEst.hr ? '1' : '0';
     chartSleepEl.dataset.estimated = hasEst.sleep ? '1' : '0';
     chartHrvEl.dataset.estimated = hasEst.hrv ? '1' : '0';
+    chartHrEl.dataset.estimatedVisible = showEstimated ? '1' : '0';
+    chartSleepEl.dataset.estimatedVisible = showEstimated ? '1' : '0';
+    chartHrvEl.dataset.estimatedVisible = showEstimated ? '1' : '0';
 
     window._estMeta = hasEst;
     window._estFlags = {
@@ -1486,6 +1495,7 @@ function renderCharts() {
         hrv: hrvRender.estimatedFlags
     };
     window._charts = charts;
+    window._estVisible = showEstimated;
 }
 
 function createChartOptions(unit, fullData, estimatedFlags = []) {
@@ -1501,7 +1511,7 @@ function createChartOptions(unit, fullData, estimatedFlags = []) {
                     label: (ctx) => {
                         const val = ctx.raw;
                         if (val === null || val === undefined) return null;
-                        const isEst = estimatedFlags && estimatedFlags[ctx.dataIndex];
+                        const isEst = showEstimated && estimatedFlags && estimatedFlags[ctx.dataIndex];
                         const prefix = isEst ? 'Estimated ' : '';
                         return `${prefix}${ctx.dataset.label}: ${Number(val).toFixed(1)} ${unit}`;
                     }
@@ -1518,7 +1528,8 @@ function createChartOptions(unit, fullData, estimatedFlags = []) {
                 const record = fullData[index];
                 if (record) showDayDetails(record.date);
             }
-        }
+        },
+        spanGaps: !showEstimated
     };
 }
 // Fetch single day details
@@ -2084,15 +2095,25 @@ function renderKPIs(data) {
     }
 
     const coverageVal = calcCoverage(last);
+    const hasSleep = last?.sleepMinutes !== null && last?.sleepMinutes !== undefined;
+    const hasHrv = last?.hrv !== null && last?.hrv !== undefined;
+    const hasRecovery = (last?.restingHr !== null && last?.restingHr !== undefined) || hasHrv;
+    const covLines = `
+        <div data-testid="coverage-metric-sleep">Sleep: ${hasSleep ? '✓' : 'Missing'}</div>
+        <div data-testid="coverage-metric-hrv">HRV: ${hasHrv ? '✓' : 'Missing'}</div>
+        <div data-testid="coverage-metric-recovery">Recovery: ${hasRecovery ? '✓' : 'Missing'}</div>
+    `;
     const headerHtml = `
-        <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items:center;">
+        <div style="grid-column: 1 / -1; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items:center; gap:0.5rem;">
              <span style="font-size:0.85rem; font-weight:600; color:var(--text-main);">${dateRangeStr}</span>
-             <span data-testid="coverage-badge" class="badge ${coverageVal < 50 ? 'badge-strained' : 'badge-neutral'}" style="font-weight: 500; font-size: 0.75rem;">
+             <span data-testid="coverage-badge" class="badge ${coverageVal < 50 ? 'badge-strained' : 'badge-neutral'}" style="font-weight: 500; font-size: 0.75rem; position:relative;">
                 Coverage: ${coverageVal}%
+                <span class="cov-info" style="margin-left:0.35rem; cursor:pointer; font-weight:700;">i</span>
+                <div class="cov-tooltip hidden" data-testid="coverage-help" style="position:absolute; right:0; top:120%; background:var(--bg-card); border:1px solid var(--border); padding:0.6rem 0.8rem; border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,0.08); width:220px; font-size:0.75rem; color:var(--text-secondary); z-index:20;">
+                    <div style="margin-bottom:0.4rem;">Coverage shows how many days in the selected period include complete sleep and recovery related metrics. Missing values are expected if the device was not worn or sleep was not recorded.</div>
+                    ${covLines}
+                </div>
             </span>
-        </div>
-        <div data-testid="coverage-help" style="grid-column: 1 / -1; margin-top:-0.25rem; margin-bottom:0.75rem; font-size:0.75rem; color:var(--text-secondary);">
-            Coverage shows how many days in the selected period include complete sleep and recovery related metrics. Missing values are expected if the device was not worn or sleep was not recorded.
         </div>
     `;
 
@@ -2184,6 +2205,17 @@ function renderKPIs(data) {
     `;
 
     kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + streakSectionHtml + achievementSectionHtml + repairHtml + footerHtml;
+
+    // Coverage tooltip bindings
+    const badge = kpiGrid.querySelector('[data-testid=\"coverage-badge\"]');
+    if (badge) {
+        const tip = badge.querySelector('.cov-tooltip');
+        const showTip = () => { if (tip) tip.classList.remove('hidden'); };
+        const hideTip = () => { if (tip) tip.classList.add('hidden'); };
+        badge.addEventListener('mouseenter', showTip);
+        badge.addEventListener('mouseleave', hideTip);
+        badge.addEventListener('click', () => { if (tip) tip.classList.toggle('hidden'); });
+    }
     bindRepairBtn();
 }
 
@@ -2565,8 +2597,14 @@ function renderExportTab(data) {
         rawBtn.className = 'btn-secondary';
         rawBtn.textContent = 'Export raw data (JSON)';
         rawBtn.style.marginTop = '0.75rem';
+        const rawExplainer = document.createElement('div');
+        rawExplainer.className = 'text-xs';
+        rawExplainer.style.color = 'var(--text-secondary)';
+        rawExplainer.style.marginTop = '0.35rem';
+        rawExplainer.textContent = 'Export includes raw Fitbit data only. Estimated values used for chart rendering are excluded.';
         currentViewDiv.appendChild(rawBtn);
         currentViewDiv.appendChild(rawStatus);
+        currentViewDiv.appendChild(rawExplainer);
 
         rawBtn.onclick = () => {
             rawStatus.textContent = '';
@@ -2578,7 +2616,14 @@ function renderExportTab(data) {
             const start = rangeStartDate || filtered.series[0].date || 'unknown';
             const end = rangeEndDate || filtered.series[filtered.series.length - 1].date || 'unknown';
             const filename = `fitbit-raw-${start}_to_${end}.json`;
-            downloadJSON(filtered.series, filename);
+            const exportPayload = {
+                exportMeta: {
+                    estimatedUsedForRendering: !!(window._estMeta && (window._estMeta.hr || window._estMeta.sleep || window._estMeta.hrv)),
+                    estimatedExcludedFromExport: true
+                },
+                data: filtered.series
+            };
+            downloadJSON(exportPayload, filename);
             rawStatus.textContent = `Downloaded ${filename}`;
             window.__LAST_DOWNLOAD__ = filename;
         };
@@ -2872,4 +2917,16 @@ function initSanityAutorun() {
     };
 
     waitForElement('#syncBtn', 15000).then(finish).catch(finish);
+}
+
+// Estimated toggle hook
+function initEstimatedToggle() {
+    const toggle = $('toggleEstimated');
+    if (!toggle) return;
+    toggle.checked = showEstimated;
+    toggle.addEventListener('change', () => {
+        showEstimated = toggle.checked;
+        localStorage.setItem('fitbit_show_estimated', showEstimated ? 'true' : 'false');
+        renderCharts();
+    });
 }

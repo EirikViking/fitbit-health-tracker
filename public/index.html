@@ -116,7 +116,7 @@
       </div>
 
       <!-- Recovery Tab -->
-      <div id="tab-recovery" class="tab-pane">
+        <div id="tab-recovery" class="tab-pane">
         <div id="recoveryMetrics" class="kpi-grid"></div>
         <div class="dashboard-grid">
           <div class="card">
@@ -126,6 +126,17 @@
           <div class="card">
             <div class="card-title">HRV (RMSSD) <span style="font-size:0.8rem">ms</span></div>
             <canvas id="chartHRV"></canvas>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.75rem; margin-top:0.75rem; flex-wrap:wrap;">
+          <label style="display:flex; align-items:center; gap:0.4rem; font-size:0.85rem;">
+            <input type="checkbox" id="toggleEstimated" checked />
+            <span>Show estimated segments</span>
+          </label>
+          <div style="display:flex; align-items:center; gap:0.4rem; font-size:0.85rem;">
+            <span>Legend:</span>
+            <span style="width:28px; height:0; border-top:2px dashed rgba(239,68,68,0.7); opacity:0.9;"></span>
+            <span>Estimated segments</span>
           </div>
         </div>
         <div id="chartEstimatedNote" data-testid="chart-estimated-note" class="text-xs" style="margin-top:0.75rem; color: var(--text-secondary);">
