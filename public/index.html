@@ -79,23 +79,6 @@
       </div>
       <!-- Overview Tab -->
       <div id="tab-overview" class="tab-pane active">
-        <!-- Day Inspector -->
-        <div class="card" style="margin-bottom: 1.5rem;">
-          <div class="card-title">Inspect Specific Day</div>
-          <div style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
-            <input type="date" id="inspectDate"
-              style="padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; background: var(--bg-card); color: var(--text-primary);">
-            <button id="inspectBtn" class="btn-secondary" style="padding: 0.4rem 1rem;">Go</button>
-          </div>
-          <div id="inspectResult" class="metric-grid hidden"
-            style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem;">
-            <!-- Results go here -->
-          </div>
-          <div id="inspectLoading" class="hidden" style="color: var(--text-secondary); font-size: 0.9rem;">Loading...
-          </div>
-          <div id="inspectError" class="hidden" style="color: var(--error); font-size: 0.9rem;"></div>
-        </div>
-
         <!-- Loading Skeleton -->
         <div id="loadingSkeleton" class="hidden">
           <div class="kpi-grid">
@@ -152,6 +135,20 @@
 
       <!-- Activity Tab -->
       <div id="tab-activity" class="tab-pane">
+        <div class="card" style="margin-bottom: 1.5rem;" data-testid="inspect-day-tool">
+          <div class="card-title">Inspect Specific Day</div>
+          <div style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;">
+            <input type="date" id="inspectDate"
+              style="padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; background: var(--bg-card); color: var(--text-primary);">
+            <button id="inspectBtn" class="btn-secondary" style="padding: 0.4rem 1rem;">Go</button>
+          </div>
+          <div id="inspectResult" class="metric-grid hidden"
+            style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1rem;">
+          </div>
+          <div id="inspectLoading" class="hidden" style="color: var(--text-secondary); font-size: 0.9rem;">Loading...
+          </div>
+          <div id="inspectError" class="hidden" style="color: var(--error); font-size: 0.9rem;"></div>
+        </div>
         <div id="activityMetrics" class="kpi-grid"></div>
       </div>
       <div id="tab-body" class="tab-pane">

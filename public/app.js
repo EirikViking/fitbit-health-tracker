@@ -307,10 +307,13 @@ function setRange(rangeType, shouldRender = true) {
         errorEl.textContent = '';
     }
 
-    // Re-render with filtered data
-    if (shouldRender && dashboardData) {
-        renderAll();
-        refreshAncillaryData();
+    // Re-render with filtered data (fetch fresh)
+    if (shouldRender) {
+        loadDashboard();
+    }
+
+    if (typeof window._toggleCustomVisibility === 'function') {
+        window._toggleCustomVisibility();
     }
 }
 
@@ -869,7 +872,8 @@ document.addEventListener('DOMContentLoaded', () => {
             <button class="range-btn" data-range="90d" data-testid="period-90">90 Days</button>
             <button class="range-btn" data-range="ytd" data-testid="period-ytd">YTD</button>
             <button class="range-btn" data-range="all" data-testid="period-alltime">All Time</button>
-            <span id="rangeDisplay" class="range-display">All available data</span>
+            <button class="range-btn" data-range="custom" data-testid="period-custom">Custom</button>
+            <span id="rangeDisplay" class="range-display" data-testid="range-label">All available data</span>
         `;
         periodToggle.insertAdjacentElement('afterend', rangePicker);
 
@@ -928,6 +932,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 resetToPresetRange();
             });
         }
+
+        // Hide custom controls until custom selected
+        const toggleCustomVisibility = () => {
+            if (currentRange === 'custom') {
+                safeClassList(customRange, cl => cl.remove('hidden'));
+            } else {
+                safeClassList(customRange, cl => cl.add('hidden'));
+            }
+        };
+        toggleCustomVisibility();
+        window._toggleCustomVisibility = toggleCustomVisibility;
     }
 
     // Inject Compare Mode Toggle
@@ -1290,15 +1305,15 @@ async function loadDashboard() {
         safeClassList(cs, cl => cl.add('hidden'));
         safeClassList(ds, cl => cl.remove('hidden'));
 
-        // 2. Fetch History (ensure enough for YTD)
-        const historyDays = Math.max(60, getDaysSinceYearStartOslo());
+        // 2. Fetch History based on selected range
+        const historyDays = getRangeDaysForFetch();
         const histRes = await fetch(`/api/history?days=${historyDays}`);
         if (!histRes.ok) throw new Error('Failed to fetch history');
         const data = await histRes.json();
 
         // Fetch body/health/features in parallel (non-blocking for UI)
-    const rangeDays = currentRange === 'all' ? 90 : (rangeStartDate && rangeEndDate ? daysBetweenInclusive(rangeStartDate, rangeEndDate) : 30);
-        const bodyPromise = fetch(`/api/body?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : null).catch(() => null);
+        const rangeDays = getRangeDaysForFetch();
+        const bodyPromise = fetch(`/api/body?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : (r.status === 401 || r.status === 403 ? { forbidden: true } : null)).catch(() => null);
         const healthPromise = fetch(`/api/health?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : null).catch(() => null);
         const featuresPromise = fetch(`/api/features`).then(r => r.ok ? r.json() : null).catch(() => null);
 
@@ -2155,11 +2170,13 @@ function renderKPIs(data) {
         const drilldownAttr = drilldownTarget ? `data-drilldown="${drilldownTarget}"` : '';
         const drilldownHint = drilldownTarget ? '<div class="drilldown-hint">Click to view details →</div>' : '';
 
+        const testId = key === 'steps' ? 'overview-steps' : key === 'caloriesOut' ? 'overview-calories' : null;
+
         return `
         <div class="kpi-card" ${drilldownAttr}>
             <div class="kpi-title">${title}</div>
             <div class="kpi-value-with-pr">
-                <div class="kpi-value">${displayVal} <span style="font-size:1rem;font-weight:400;color:#666">${unit}</span></div>
+                <div class="kpi-value"${testId ? ` data-testid="${testId}"` : ''}>${displayVal} <span style="font-size:1rem;font-weight:400;color:#666">${unit}</span></div>
                 ${prBadgeHtml}
             </div>
             <div class="kpi-meta">${trendHtml}</div>
@@ -2279,13 +2296,21 @@ function renderKPIs(data) {
     const prSectionHtml = renderPRSection(data);
     const streakSectionHtml = renderStreakSection(data);
     const achievementSectionHtml = renderAchievementSection(data);
+    const workoutsHtml = `
+        <div class="kpi-card" data-testid="overview-workouts">
+            <div class="kpi-title">Workouts</div>
+            <div class="kpi-value-with-pr">
+                <div class="kpi-value text-sm">No workouts found in this period. If you trained, run Sync and check Fitbit permissions.</div>
+            </div>
+        </div>
+    `;
     const footerHtml = `
         <div style="grid-column: 1 / -1; margin-top: 1rem; text-align: right; font-size: 0.75rem; color: var(--text-secondary);">
             <span id="overviewUpdateTimestamp">Granularity applied: ${currentPeriod}</span>
         </div>
     `;
 
-    kpiGrid.innerHTML = headerHtml + standardCards + recHtml + insightsHtml + prSectionHtml + streakSectionHtml + achievementSectionHtml + repairHtml + footerHtml;
+    kpiGrid.innerHTML = headerHtml + standardCards + workoutsHtml + recHtml + insightsHtml + prSectionHtml + streakSectionHtml + achievementSectionHtml + repairHtml + footerHtml;
 
     // Coverage tooltip bindings
     const badge = kpiGrid.querySelector('[data-testid=\"coverage-badge\"]');
@@ -2609,6 +2634,16 @@ function renderActivityTab(data) {
         },
         options: createChartOptions('steps', rows)
     });
+
+    // Workouts placeholder/list
+    let workoutsList = activityTab.querySelector('[data-testid="activity-workouts-list"]');
+    if (!workoutsList) {
+        workoutsList = document.createElement('div');
+        workoutsList.setAttribute('data-testid', 'activity-workouts-list');
+        workoutsList.style.marginTop = '1rem';
+        activityTab.appendChild(workoutsList);
+    }
+    workoutsList.innerHTML = `<div class="card"><div class="card-title">Workouts</div><div class="text-sm">No workouts found in this period. If you trained, run Sync and check Fitbit permissions.</div></div>`;
 }
 
 function renderBodyTab(body) {
@@ -2619,12 +2654,23 @@ function renderBodyTab(body) {
         <div class="text-xs text-secondary" data-testid="coverage-label" style="margin-top:0.5rem;">
             Loaded: ${days} of ${expectedDays} days
         </div>`;
+    if (body && body.forbidden) {
+        container.innerHTML = `
+            <div class="empty-state" data-testid="body-empty">
+                <div class="empty-state-icon">⚖️</div>
+                <h3 class="empty-state-title">Weight permission missing</h3>
+                <p class="empty-state-text">Re-auth Fitbit with weight scope to see weight logs.</p>
+            </div>
+            ${coverageLabel(0)}
+        `;
+        return;
+    }
     if (!body || !Array.isArray(body.rows) || body.rows.length === 0) {
         container.innerHTML = `
-            <div class="empty-state">
+            <div class="empty-state" data-testid="body-empty">
                 <div class="empty-state-icon">⚖️</div>
                 <h3 class="empty-state-title">No weight logs found</h3>
-                <p class="empty-state-text">Add weight logs in Fitbit to see trends here.</p>
+                <p class="empty-state-text">Add a weight entry in Fitbit, then Sync.</p>
             </div>
             ${coverageLabel(0)}
         `;

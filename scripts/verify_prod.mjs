@@ -130,6 +130,9 @@ async function main() {
 
   await page.goto(url.toString(), { waitUntil: 'domcontentloaded' });
 
+  // Wait for overview to render
+  await page.waitForSelector('#overviewKPIs .kpi-card', { timeout: 15000 }).catch(() => {});
+
   // Coverage explanation + tooltip metrics
   await page.waitForSelector('[data-testid="coverage-badge"]', { timeout: 15000 }).catch(() => {});
   const covBadge = await page.locator('[data-testid="coverage-badge"]').count();
@@ -165,13 +168,25 @@ async function main() {
   }
 
   // Period buttons test ids exist
-  const periodIds = ['period-7', 'period-30', 'period-90', 'period-ytd', 'period-alltime'];
+  const periodIds = ['period-7', 'period-30', 'period-90', 'period-ytd', 'period-alltime', 'period-custom'];
   for (const pid of periodIds) {
     if (await page.locator(`[data-testid=\"${pid}\"]`).count() === 0) {
       console.error('Missing period test id', pid);
       await browser.close();
       process.exit(1);
     }
+  }
+
+  // Range label changes with period
+  const rangeLabel = page.locator('[data-testid="range-label"]');
+  await page.locator('[data-testid="period-7"]').click();
+  const label7 = await rangeLabel.innerText();
+  await page.locator('[data-testid="period-30"]').click();
+  const label30 = await rangeLabel.innerText();
+  if (label7 === label30) {
+    console.error('Range label did not change between 7 and 30 days', { label7, label30 });
+    await browser.close();
+    process.exit(1);
   }
 
   // Compare mode basic
@@ -616,6 +631,11 @@ async function main() {
     await browser.close();
     process.exit(1);
   }
+  if (bodyEmpty > 0 && await page.locator('[data-testid="body-empty"]').count() === 0) {
+    console.error('Body empty state missing test id');
+    await browser.close();
+    process.exit(1);
+  }
 
   await page.locator('[data-testid="tab-health"]').first().click({ timeout: 15000 });
   await page.waitForTimeout(300);
@@ -629,6 +649,43 @@ async function main() {
   }
   if (healthEmpty === 0 && healthCard === 0) {
     console.error('Health tab missing both empty state and cards');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Primary cards exist after range changes
+  await page.locator('nav button[data-tab="overview"]').click();
+  const cardsAfter90 = await page.locator('#overviewKPIs .kpi-card').count();
+  await page.locator('[data-testid="period-7"]').click();
+  await page.waitForTimeout(400);
+  const cardsAfter7 = await page.locator('#overviewKPIs .kpi-card').count();
+  if (cardsAfter90 === 0 || cardsAfter7 === 0) {
+    console.error('Overview cards missing after range change', { cardsAfter90, cardsAfter7 });
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Custom inputs hidden until custom selected
+  const customVisibleBefore = await page.locator('.custom-range-container:not(.hidden)').count();
+  if (customVisibleBefore !== 0) {
+    console.error('Custom inputs visible before selecting custom');
+    await browser.close();
+    process.exit(1);
+  }
+  await page.locator('[data-testid="period-custom"]').click();
+  const customVisibleAfter = await page.locator('.custom-range-container:not(.hidden)').count();
+  if (customVisibleAfter === 0) {
+    console.error('Custom inputs not visible after selecting custom');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Inspect tool only in activity tab
+  const inspectOverview = await page.locator('#tab-overview [data-testid="inspect-day-tool"]').count();
+  await page.locator('nav button[data-tab="activity"]').click();
+  const inspectActivity = await page.locator('#tab-activity [data-testid="inspect-day-tool"]').count();
+  if (inspectOverview !== 0 || inspectActivity === 0) {
+    console.error('Inspect day tool placement incorrect', { inspectOverview, inspectActivity });
     await browser.close();
     process.exit(1);
   }
