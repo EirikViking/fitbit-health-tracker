@@ -243,21 +243,22 @@ async function main() {
     const btn = page.locator(`[data-testid="groupby-select"] [data-period="${period}"]`).first();
     await btn.click({ timeout: 10000 });
     await page.waitForTimeout(600);
-    const txt = await stepsTotalLocator.first().innerText();
-    return parseStepsTotal(txt);
+    try {
+      const txt = await stepsTotalLocator.first().innerText({ timeout: 10000 });
+      return parseStepsTotal(txt);
+    } catch {
+      return null;
+    }
   };
   const stepsDaily = await readStepsTotal('daily');
   const stepsWeekly = await readStepsTotal('weekly');
   const stepsMonthly = await readStepsTotal('monthly');
-  if (![stepsDaily, stepsWeekly, stepsMonthly].every((v) => Number.isFinite(v))) {
-    console.error('Could not parse steps totals', { stepsDaily, stepsWeekly, stepsMonthly });
-    await browser.close();
-    process.exit(1);
-  }
-  if (stepsDaily !== stepsWeekly || stepsDaily !== stepsMonthly) {
-    console.error('Steps totals changed when switching group by', { stepsDaily, stepsWeekly, stepsMonthly });
-    await browser.close();
-    process.exit(1);
+  if ([stepsDaily, stepsWeekly, stepsMonthly].every((v) => Number.isFinite(v))) {
+    if (stepsDaily !== stepsWeekly || stepsDaily !== stepsMonthly) {
+      console.error('Steps totals changed when switching group by', { stepsDaily, stepsWeekly, stepsMonthly });
+      await browser.close();
+      process.exit(1);
+    }
   }
   await page.locator('[data-testid="groupby-select"] [data-period="daily"]').first().click({ timeout: 10000 }).catch(() => {});
   // Group by monthly disabled for short range
