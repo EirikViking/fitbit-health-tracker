@@ -238,6 +238,20 @@ function setRange(rangeType, shouldRender = true) {
     rangeStartDate = startDate;
     rangeEndDate = endDate;
 
+    // Auto-adjust group by based on range length
+    const rangeDays = startDate && endDate ? daysBetween(startDate, endDate) + 1 : null;
+    const validPeriods = [];
+    if (rangeDays === null || rangeDays <= 14) {
+        validPeriods.push('daily');
+    } else if (rangeDays <= 60) {
+        validPeriods.push('daily', 'weekly');
+    } else {
+        validPeriods.push('daily', 'weekly', 'monthly');
+    }
+    if (!validPeriods.includes(currentPeriod)) {
+        currentPeriod = validPeriods[validPeriods.length - 1];
+    }
+
     // Update UI
     document.querySelectorAll('.range-btn').forEach(btn => {
         if (btn.dataset.range === rangeType) {
@@ -245,6 +259,15 @@ function setRange(rangeType, shouldRender = true) {
         } else {
             safeClassList(btn, cl => cl.remove('active'));
         }
+    });
+
+    // Update group-by buttons to reflect availability
+    document.querySelectorAll('[data-period]').forEach(btn => {
+        const p = btn.dataset.period;
+        const isValid = !rangeStartDate || !rangeEndDate || (p === 'daily' || (p === 'weekly' && (rangeDays === null || rangeDays > 14)) || (p === 'monthly' && (rangeDays === null || rangeDays > 60)));
+        btn.disabled = !isValid;
+        if (!isValid) safeClassList(btn, cl => cl.remove('active'));
+        btn.setAttribute('data-testid', `groupby-${p}`);
     });
 
     // Update range display
