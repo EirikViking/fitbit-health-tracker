@@ -130,6 +130,7 @@ export default {
             if (url.pathname === "/api/export/daily") return handleExportDaily(request, env);
             if (url.pathname === "/api/export/weekly") return handleExportWeekly(request, env);
             if (url.pathname === "/api/export/monthly") return handleExportMonthly(request, env);
+            if (url.pathname === "/api/export/ai") return handleExportAI(request, env);
 
 
             // API Routes
@@ -153,6 +154,9 @@ export default {
             if (url.pathname === "/api/sync") return handleSyncTrigger(request, env);
             if (url.pathname === "/api/history") return handleHistory(request, env);
             if (url.pathname === "/api/day") return handleDay(request, env);
+            if (url.pathname === "/api/body") return handleBody(request, env);
+            if (url.pathname === "/api/health") return handleHealthMetrics(request, env);
+            if (url.pathname === "/api/features") return handleFeatures(request, env);
 
             // Phase 2E: Backfill & Cron
             if (url.pathname === "/api/backfill") return handleBackfill(request, env, ctx);
@@ -2164,6 +2168,128 @@ async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, s
     return { ok: true, status: 200, data };
 }
 
+async function handleExportAI(req: Request, env: Env): Promise<Response> {
+    const today = new Date().toISOString().split('T')[0];
+    const start = new Date();
+    start.setDate(start.getDate() - 89); // 90-day window
+    const startStr = start.toISOString().split('T')[0];
+
+    const daily = await env.FITBIT_DB.prepare(
+        "SELECT * FROM daily_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC"
+    ).bind(startStr, today).all();
+
+    const body = await env.FITBIT_DB.prepare(
+        "SELECT date, weightKg, fatPct, bmi FROM body_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC"
+    ).bind(startStr, today).all();
+
+    const health = await env.FITBIT_DB.prepare(
+        "SELECT date, metric, value, unit, json FROM health_metrics_daily WHERE date >= ? AND date <= ? ORDER BY date ASC"
+    ).bind(startStr, today).all();
+
+    const features = await env.FITBIT_DB.prepare("SELECT feature, supported, lastStatus, lastChecked, note FROM feature_support").all();
+
+    const metricsGrouped: Record<string, any[]> = {};
+    for (const r of (health.results || []) as any[]) {
+        if (!metricsGrouped[r.metric]) metricsGrouped[r.metric] = [];
+        metricsGrouped[r.metric].push({
+            date: r.date,
+            value: r.value,
+            unit: r.unit,
+            json: r.json ? JSON.parse(r.json) : undefined
+        });
+    }
+
+    return jsonResponse(env, {
+        generatedAt: new Date().toISOString(),
+        range: { start: startStr, end: today },
+        daily: daily.results || [],
+        body: body.results || [],
+        health: metricsGrouped,
+        features: (features.results || []).reduce((acc: any, r: any) => {
+            acc[r.feature] = { supported: !!r.supported, lastStatus: r.lastStatus, lastChecked: r.lastChecked, note: r.note };
+            return acc;
+        }, {})
+    });
+}
+
+// --- Body & Health endpoints ---
+
+function parseIsoDateParam(url: URL, key: string): string | null {
+    const v = url.searchParams.get(key);
+    if (!v) return null;
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+}
+
+async function handleBody(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+    const url = new URL(req.url);
+    const from = parseIsoDateParam(url, "from");
+    const to = parseIsoDateParam(url, "to");
+    if (!from || !to || from > to) return new Response("Invalid from/to", { status: 400 });
+
+    const { results } = await env.FITBIT_DB.prepare(
+        "SELECT date, weightKg, fatPct, bmi FROM body_metrics WHERE date >= ? AND date <= ? ORDER BY date ASC"
+    ).bind(from, to).all();
+
+    const rows = (results || []) as any[];
+    const expectedDays = daysBetweenInclusive(from, to);
+    const daysWithAny = rows.filter(r => r.weightKg !== null || r.fatPct !== null || r.bmi !== null).length;
+
+    return jsonResponse(env, {
+        from, to,
+        coverage: { daysWithAny, expectedDays },
+        rows
+    });
+}
+
+async function handleHealthMetrics(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+    const url = new URL(req.url);
+    const from = parseIsoDateParam(url, "from");
+    const to = parseIsoDateParam(url, "to");
+    if (!from || !to || from > to) return new Response("Invalid from/to", { status: 400 });
+
+    const { results } = await env.FITBIT_DB.prepare(
+        "SELECT date, metric, value, unit, json FROM health_metrics_daily WHERE date >= ? AND date <= ? ORDER BY date ASC"
+    ).bind(from, to).all();
+
+    const metrics: Record<string, any[]> = {};
+    for (const r of (results || []) as any[]) {
+        if (!metrics[r.metric]) metrics[r.metric] = [];
+        metrics[r.metric].push({
+            date: r.date,
+            value: r.value,
+            unit: r.unit,
+            json: r.json ? JSON.parse(r.json) : undefined
+        });
+    }
+
+    const supportRows = await env.FITBIT_DB.prepare("SELECT feature, supported, lastStatus, lastChecked, note FROM feature_support").all();
+    const support: Record<string, boolean> = {};
+    for (const r of (supportRows.results || []) as any[]) {
+        support[r.feature] = !!r.supported;
+    }
+
+    return jsonResponse(env, { from, to, metrics, support });
+}
+
+async function handleFeatures(req: Request, env: Env): Promise<Response> {
+    if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+    const defaults = ["body_weight", "body_fat", "cardioscore", "spo2", "temp", "breathing", "water", "food"];
+    const rows = await env.FITBIT_DB.prepare("SELECT feature, supported, lastStatus, lastChecked, note FROM feature_support").all();
+    const map: Record<string, any> = {};
+    for (const r of (rows.results || []) as any[]) {
+        map[r.feature] = {
+            supported: !!r.supported,
+            lastStatus: r.lastStatus,
+            lastChecked: r.lastChecked,
+            note: r.note
+        };
+    }
+    defaults.forEach(f => { if (!map[f]) map[f] = { supported: false, lastStatus: null, lastChecked: null, note: null }; });
+    return jsonResponse(env, { features: map });
+}
+
 // --- Feature capability cache helpers ---
 
 type FeatureSupportRow = {
@@ -2209,6 +2335,108 @@ async function tryFetchFeature<T>(
     const cached = await featureSupportGet(env, feature);
     if (cached && cached.supported === 0 && !shouldRecheckFeature(cached)) {
         return null;
+    }
+
+    // --- Body metrics (weight / fat / bmi) ---
+    const bodyParsed = await tryFetchFeature(env, "body_weight", `/body/log/weight/date/${date}/${date}.json`, (json) => {
+        const arr = Array.isArray(json?.weight) ? json.weight : [];
+        if (arr.length === 0) return null;
+        const entry = arr[0];
+        return {
+            weightKg: typeof entry.weight === "number" ? entry.weight : null,
+            bmi: typeof entry.bmi === "number" ? entry.bmi : null,
+            raw: entry
+        };
+    });
+
+    const fatParsed = await tryFetchFeature(env, "body_fat", `/body/log/fat/date/${date}/${date}.json`, (json) => {
+        const arr = Array.isArray(json?.fat) ? json.fat : [];
+        if (arr.length === 0) return null;
+        const entry = arr[0];
+        return {
+            fatPct: typeof entry.fat === "number" ? entry.fat : null,
+            raw: entry
+        };
+    });
+
+    if (bodyParsed || fatParsed) {
+        const now = new Date().toISOString();
+        await env.FITBIT_DB.prepare(`
+            INSERT INTO body_metrics (date, weightKg, fatPct, bmi, updatedAt, raw)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                weightKg = COALESCE(excluded.weightKg, body_metrics.weightKg),
+                fatPct = COALESCE(excluded.fatPct, body_metrics.fatPct),
+                bmi = COALESCE(excluded.bmi, body_metrics.bmi),
+                updatedAt = excluded.updatedAt,
+                raw = COALESCE(excluded.raw, body_metrics.raw)
+        `).bind(
+            date,
+            bodyParsed?.weightKg ?? null,
+            fatParsed?.fatPct ?? null,
+            bodyParsed?.bmi ?? null,
+            now,
+            JSON.stringify(bodyParsed?.raw || fatParsed?.raw || null)
+        ).run();
+    }
+
+    // --- Health metrics (capability-driven) ---
+    const healthInserts: Array<{ metric: string; value: number | null; unit?: string | null; json?: any }> = [];
+
+    const cardio = await tryFetchFeature(env, "cardioscore", `/cardioscore/date/${date}/${date}.json`, (json) => {
+        const v = json?.cardioScore ? json.cardioScore[0]?.value?.vo2Max : json?.cardio_score?.[0]?.value?.vo2Max;
+        return typeof v === "number" ? { value: v, unit: "ml/kg/min", raw: json?.cardioScore?.[0] || json?.cardio_score?.[0] } : null;
+    });
+    if (cardio) healthInserts.push({ metric: "cardioscore", value: cardio.value, unit: cardio.unit, json: cardio.raw });
+
+    const spo2 = await tryFetchFeature(env, "spo2", `/spo2/date/${date}/${date}.json`, (json) => {
+        const v = json?.value ?? json?.spo2?.[0]?.value;
+        return typeof v === "number" ? { value: v, unit: "%" } : null;
+    });
+    if (spo2) healthInserts.push({ metric: "spo2", value: spo2.value, unit: "%" });
+
+    const temp = await tryFetchFeature(env, "temp", `/temp/core/date/${date}/${date}.json`, (json) => {
+        const v = json?.tempCore?.[0]?.value;
+        return typeof v === "number" ? { value: v, unit: "C" } : null;
+    }) ?? await tryFetchFeature(env, "temp", `/temp/skin/date/${date}/${date}.json`, (json) => {
+        const v = json?.tempSkin?.[0]?.value;
+        return typeof v === "number" ? { value: v, unit: "C" } : null;
+    });
+    if (temp) healthInserts.push({ metric: "temp", value: temp.value, unit: temp.unit });
+
+    const breathing = await tryFetchFeature(env, "breathing", `/br/date/${date}/${date}.json`, (json) => {
+        const v = json?.br?.[0]?.value;
+        return typeof v === "number" ? { value: v, unit: "rpm" } : null;
+    });
+    if (breathing) healthInserts.push({ metric: "breathing", value: breathing.value, unit: "rpm" });
+
+    const water = await tryFetchFeature(env, "water", `/foods/log/water/date/${date}.json`, (json) => {
+        const v = json?.summary?.water || json?.water;
+        return typeof v === "number" ? { value: v, unit: "ml", raw: json } : null;
+    });
+    if (water) healthInserts.push({ metric: "water", value: water.value, unit: "ml", json: water.raw });
+
+    const food = await tryFetchFeature(env, "food", `/foods/log/date/${date}.json`, (json) => {
+        const cals = json?.summary?.calories || json?.foodsLog?.calories;
+        if (typeof cals === "number") return { value: cals, unit: "kcal", raw: json?.summary };
+        return json ? { value: null, unit: null, raw: json?.summary } : null;
+    });
+    if (food) healthInserts.push({ metric: "food", value: food.value, unit: food.unit, json: food.raw });
+
+    if (healthInserts.length > 0) {
+        const now = new Date().toISOString();
+        const stmt = env.FITBIT_DB.prepare(`
+            INSERT INTO health_metrics_daily (date, metric, value, unit, json, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, metric) DO UPDATE SET
+                value = excluded.value,
+                unit = COALESCE(excluded.unit, health_metrics_daily.unit),
+                json = COALESCE(excluded.json, health_metrics_daily.json),
+                updatedAt = excluded.updatedAt
+        `);
+        for (const h of healthInserts) {
+            await stmt.bind(date, h.metric, h.value ?? null, h.unit ?? null, h.json ? JSON.stringify(h.json) : null, now).run();
+        }
     }
 
     const res = await fetchFitbitJSON(env, path);
