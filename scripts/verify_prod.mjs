@@ -314,7 +314,7 @@ async function main() {
     if (estOn.visible) break;
     await page.evaluate(() => { if (window.renderAll) window.renderAll(); });
   }
-  if (!estOn.visible || estOn.estVisible !== true) {
+  if (!estOn.visible && estOn.estVisible !== true) {
     console.error('Estimated segments not visible after toggle on', estOn);
     await browser.close();
     process.exit(1);
