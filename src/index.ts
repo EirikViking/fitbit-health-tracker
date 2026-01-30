@@ -1583,21 +1583,47 @@ async function handleCallback(req: Request, env: Env): Promise<Response> {
 // Re-using fetchFitbitJSON logic for strict no-fail behavior
 async function handleToday(req: Request, env: Env): Promise<Response> {
     const dateStr = new Date().toISOString().split('T')[0];
+    const cached = await env.FITBIT_DB.prepare("SELECT json, updatedAt FROM today_cache WHERE key = 'today'").first();
+    const now = Date.now();
+    let cachedJson: any = null;
+    let cachedAt: string | null = null;
+    if (cached?.json) {
+        try { cachedJson = JSON.parse(cached.json); } catch { cachedJson = null; }
+        cachedAt = cached?.updatedAt || null;
+    }
+
+    const isFresh = cachedAt ? (now - new Date(cachedAt).getTime()) < 10 * 60 * 1000 : false;
+    if (cachedJson && isFresh) {
+        return jsonResponse(env, { ...cachedJson, stale: false, cachedAt });
+    }
+
     const res = await fetchFitbitJSON(env, `/activities/date/${dateStr}.json`);
 
     if (res.status === 401) return unauthorizedResponse(env);
-    if (!res.ok) return new Response(JSON.stringify({ error: "upstream_error", details: res.data }), { status: 502 });
 
-    const summary = res.data?.summary;
-    const result = {
-        summary: {
-            date: dateStr,
-            steps: summary?.steps || 0,
-            caloriesOut: summary?.caloriesOut || 0,
-            distanceKm: (summary?.distances?.find((d: any) => d.activity === "total")?.distance || 0)
-        }
-    };
-    return jsonResponse(env, result);
+    if (res.ok) {
+        const summary = res.data?.summary;
+        const result = {
+            summary: {
+                date: dateStr,
+                steps: summary?.steps || 0,
+                caloriesOut: summary?.caloriesOut || 0,
+                distanceKm: (summary?.distances?.find((d: any) => d.activity === "total")?.distance || 0)
+            }
+        };
+        await env.FITBIT_DB.prepare(`
+            INSERT INTO today_cache (key, json, updatedAt)
+            VALUES ('today', ?, ?)
+            ON CONFLICT(key) DO UPDATE SET json = excluded.json, updatedAt = excluded.updatedAt
+        `).bind(JSON.stringify(result), new Date().toISOString()).run();
+        return jsonResponse(env, { ...result, stale: false, cachedAt: new Date().toISOString() });
+    }
+
+    if (cachedJson) {
+        return jsonResponse(env, { ...cachedJson, stale: true, cachedAt, refreshError: true });
+    }
+
+    return new Response(JSON.stringify({ error: "upstream_error", details: res.data || null }), { status: 503 });
 }
 
 async function handleSleepToday(req: Request, env: Env): Promise<Response> {

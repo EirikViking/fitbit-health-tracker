@@ -412,6 +412,27 @@ async function main() {
     process.exit(1);
   }
 
+  // Today failure resilience: block /api/today once
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 720 }
+  });
+  await ctx.route('**/api/today', (route) => {
+    route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'forced_fail' }) });
+  }, { times: 1 });
+  const page2 = await ctx.newPage();
+  const consoleErrors2 = [];
+  page2.on('console', (msg) => { if (msg.type() === 'error') consoleErrors2.push(msg.text()); });
+  await page2.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+  await page2.waitForSelector('#overviewKPIs .kpi-card', { timeout: 15000 });
+  const cardsPresent = await page2.locator('#overviewKPIs .kpi-card').count();
+  if (cardsPresent === 0) {
+    console.error('Overview cards missing after today fail');
+    await browser.close();
+    await ctx.close();
+    process.exit(1);
+  }
+  await ctx.close();
+
   // Direct range fetch check
   const rangeCheck = await page.evaluate(async () => {
     const res = await fetch('/api/range?from=2025-12-01&to=2025-12-31&limit=10');

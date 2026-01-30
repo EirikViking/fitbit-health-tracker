@@ -1270,13 +1270,19 @@ async function loadDashboard() {
         // 1. Check if we are connected by fetching today (fastest check)
         // If today returns 401, show connect screen
         // Note: Use /api/today just for auth check fallback
-        const authRes = await fetch('/api/today');
-        if (authRes.status === 401) {
-            const cs = $('connectSection');
-            const ds = $('dashboardSection');
-            safeClassList(cs, cl => cl.remove('hidden'));
-            safeClassList(ds, cl => cl.add('hidden'));
-            return;
+        let todayData = null;
+        try {
+            const authRes = await fetch('/api/today');
+            if (authRes.status === 401) {
+                const cs = $('connectSection');
+                const ds = $('dashboardSection');
+                safeClassList(cs, cl => cl.remove('hidden'));
+                safeClassList(ds, cl => cl.add('hidden'));
+                return;
+            }
+            if (authRes.ok) todayData = await authRes.json();
+        } catch (e) {
+            console.warn('today fetch failed', e);
         }
 
         const cs = $('connectSection');
@@ -1319,6 +1325,13 @@ async function loadDashboard() {
         renderRecoveryTab(data);
         renderActivityTab(data);
         renderExportTab(data);
+
+        if (!todayData || todayData.stale) {
+            const note = document.createElement('div');
+            note.className = 'text-xs text-secondary';
+            note.textContent = 'Today data temporarily unavailable';
+            $('syncStatus')?.insertAdjacentElement('afterend', note);
+        }
 
         // Update status
         if (series.length > 0) {
