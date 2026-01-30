@@ -178,6 +178,22 @@ function daysBetween(startISO, endISO) {
 
 const Daysbetween = daysBetween; // compatibility alias
 
+function getRangeDaysForFetch() {
+    if (rangeStartDate && rangeEndDate) {
+        const days = daysBetweenInclusive(rangeStartDate, rangeEndDate);
+        return days > 0 ? days : 1;
+    }
+    switch (currentRange) {
+        case '7d': return 7;
+        case '30d': return 30;
+        case '90d': return 90;
+        case 'ytd': return getDaysSinceYearStartOslo();
+        case 'all':
+        default:
+            return 90;
+    }
+}
+
 function getDaysSinceYearStartOslo() {
     const end = getOsloTodayISO();
     const start = `${end.slice(0, 4)}-01-01`;
