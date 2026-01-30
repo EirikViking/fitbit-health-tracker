@@ -2586,6 +2586,11 @@ function renderActivityTab(data) {
 function renderBodyTab(body) {
     const container = $('bodyContent');
     if (!container) return;
+    const expectedDays = rangeStartDate && rangeEndDate ? daysBetweenInclusive(rangeStartDate, rangeEndDate) : 90;
+    const coverageLabel = (days) => `
+        <div class="text-xs text-secondary" data-testid="coverage-label" style="margin-top:0.5rem;">
+            Loaded: ${days} of ${expectedDays} days
+        </div>`;
     if (!body || !Array.isArray(body.rows) || body.rows.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -2593,6 +2598,7 @@ function renderBodyTab(body) {
                 <h3 class="empty-state-title">No weight logs found</h3>
                 <p class="empty-state-text">Add weight logs in Fitbit to see trends here.</p>
             </div>
+            ${coverageLabel(0)}
         `;
         return;
     }
@@ -2619,7 +2625,7 @@ function renderBodyTab(body) {
             </div>
         </div>
         <div class="text-xs text-secondary" data-testid="coverage-label" style="margin-top:0.5rem;">
-            Loaded: ${coverage.daysWithAny || 0} of ${coverage.expectedDays || rows.length} days
+            Loaded: ${coverage.daysWithAny || 0} of ${coverage.expectedDays || expectedDays} days
         </div>
     `;
 }
