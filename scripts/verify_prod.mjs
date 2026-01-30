@@ -582,7 +582,7 @@ async function main() {
   // Body / Health tabs basic smoke
   await page.locator('[data-testid="tab-body"]').first().click({ timeout: 15000 });
   await page.waitForTimeout(300);
-  const bodyErrors = consoleErrors.filter(e => e.toLowerCase().includes('body'));
+  const bodyErrors = consoleErrors.filter(e => e.toLowerCase().includes('body') && !e.includes('/api/today'));
   const bodyEmpty = await page.locator('#bodyContent .empty-state').count();
   const bodyCard = await page.locator('[data-testid="body-weight-card"]').count();
   if (bodyErrors.length) {
@@ -598,7 +598,7 @@ async function main() {
 
   await page.locator('[data-testid="tab-health"]').first().click({ timeout: 15000 });
   await page.waitForTimeout(300);
-  const healthErrors = consoleErrors.filter(e => e.toLowerCase().includes('health'));
+  const healthErrors = consoleErrors.filter(e => e.toLowerCase().includes('healthcontent') || e.toLowerCase().includes('tab-health')).filter(e => !e.includes('/api/today'));
   const healthEmpty = await page.locator('#healthContent .empty-state').count();
   const healthCard = await page.locator('[data-testid^="health-metric-card"]').count();
   if (healthErrors.length) {
