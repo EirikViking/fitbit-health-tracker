@@ -206,7 +206,8 @@ async function main() {
     const el = document.querySelector('[data-testid="compare-toggle"]');
     if (el) el.click();
   });
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(900);
+  await page.evaluate(() => { if (window.renderAll) window.renderAll(); });
   const compareStateOn = await page.evaluate(() => ({
     attr: document.querySelector('#overviewKPIs')?.getAttribute('data-testid'),
     cards: document.querySelectorAll('#overviewKPIs .compare-mode').length,
