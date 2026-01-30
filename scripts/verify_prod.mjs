@@ -27,10 +27,38 @@ if (!PROD_URL) {
 
 const url = new URL(PROD_URL);
 url.searchParams.set('autorunSanity', '1');
+const BASE_URL = PROD_URL.endsWith('/') ? PROD_URL.slice(0, -1) : PROD_URL;
 
 async function main() {
   const chromium = await loadPlaywright();
   const browser = await chromium.launch({ headless: true });
+
+  // Autorun Repair completion signals
+  const repairPage = await browser.newPage();
+  let repairDoneLine = null;
+  repairPage.on('console', (msg) => {
+    const text = msg.text();
+    if (text.startsWith('[repair] done ')) repairDoneLine = text;
+  });
+  const repairUrl = new URL(BASE_URL);
+  repairUrl.searchParams.set('autorunRepair', '1');
+  repairUrl.searchParams.set('limit', '10');
+  await repairPage.goto(repairUrl.toString(), { waitUntil: 'domcontentloaded' });
+  await repairPage.waitForFunction(() => {
+    const bodyFlag = document.body ? document.body.getAttribute('data-repair-done') : null;
+    return window.REPAIR_DONE === true && bodyFlag === '1';
+  }, { timeout: 90000 }).catch(() => {});
+  const repairFlags = await repairPage.evaluate(() => ({
+    win: window.REPAIR_DONE === true,
+    body: document.body ? document.body.getAttribute('data-repair-done') : null
+  }));
+  if (!repairFlags.win || repairFlags.body !== '1' || !repairDoneLine) {
+    console.error('Repair autorun completion signals missing', { repairFlags, repairDoneLine });
+    await browser.close();
+    process.exit(1);
+  }
+  await repairPage.close();
+
   const page = await browser.newPage();
   const consoleErrors = [];
   let sanityLine = null;
@@ -41,6 +69,14 @@ async function main() {
     if (msg.type() === 'error') consoleErrors.push(`console:${text}`);
     if (text.startsWith('[sanity] done ')) sanityLine = text;
   });
+
+  const favResp = await page.request.get(`${BASE_URL}/favicon.ico`);
+  const favBody = await favResp.body();
+  if (favResp.status() !== 200 || !favBody || favBody.length === 0) {
+    console.error('Favicon missing or empty', { status: favResp.status(), length: favBody ? favBody.length : 0 });
+    await browser.close();
+    process.exit(1);
+  }
 
   await page.goto(url.toString(), { waitUntil: 'domcontentloaded' });
 
@@ -77,6 +113,27 @@ async function main() {
     await browser.close();
     process.exit(1);
   }
+
+  // Sleep monthly range labels
+  await page.locator('nav button[data-tab="sleep"]').first().click();
+  await page.locator('.range-btn[data-range="all"]').first().click();
+  await page.locator('[data-period="monthly"]').first().click();
+  await page.waitForTimeout(600);
+  const rangeDates = await page.evaluate(() => {
+    const card = Array.from(document.querySelectorAll('#sleepMetrics .kpi-card')).find(el => el.querySelector('.kpi-title')?.textContent?.includes('Range'));
+    if (!card) return [];
+    return Array.from(card.querySelectorAll('.stat-block .text-sm')).map(el => {
+      const match = el.textContent.match(/\(([^)]+)\)/);
+      return match ? match[1].trim() : null;
+    }).filter(Boolean);
+  });
+  const monthlyLabelsOk = rangeDates.length >= 1 && rangeDates.every(d => /^\d{4}-\d{2}$/.test(d));
+  if (!monthlyLabelsOk) {
+    console.error('Monthly range labels not in YYYY-MM format', rangeDates);
+    await browser.close();
+    process.exit(1);
+  }
+  await page.locator('[data-period="daily"]').first().click({ force: true }).catch(() => {});
 
   // Estimated toggle OFF/ON
   await page.locator('nav button[data-tab="recovery"]').click();
@@ -201,15 +258,20 @@ async function main() {
     process.exit(1);
   }
 
+  let sanityFlags = { win: false, body: null, root: null };
   const start = Date.now();
   while (Date.now() - start < 30000) {
-    const done = await page.evaluate(() => document.documentElement.dataset.sanityDone === "1");
-    if (done && sanityLine) break;
+    sanityFlags = await page.evaluate(() => ({
+      win: window.SANITY_DONE === true,
+      body: document.body ? document.body.getAttribute('data-sanity-done') : null,
+      root: document.documentElement.dataset.sanityDone
+    }));
+    if (sanityFlags.win && sanityFlags.body === '1' && sanityLine) break;
     await page.waitForTimeout(300);
   }
 
-  if (!sanityLine) {
-    console.error('Missing [sanity] done line');
+  if (!sanityLine || !sanityFlags.win || sanityFlags.body !== '1') {
+    console.error('Missing sanity completion signals', { sanityLine, sanityFlags });
     await browser.close();
     process.exit(1);
   }

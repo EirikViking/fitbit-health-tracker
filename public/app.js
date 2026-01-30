@@ -2271,14 +2271,35 @@ function renderSleepTab(data) {
     const validRows = rows.filter(r => safeNumber(r.sleepMinutes) !== null && r.sleepMinutes > 0);
     let bestWorstHtml = '<div class="text-sm">Not enough data</div>';
     if (validRows.length > 0) {
-        const max = validRows.reduce((p, c) => p.sleepMinutes > c.sleepMinutes ? p : c);
-        const min = validRows.reduce((p, c) => p.sleepMinutes < c.sleepMinutes ? p : c);
-        bestWorstHtml = `
-            <div class="stat-block">
-                <span class="text-sm">Max: <strong>${(max.sleepMinutes / 60).toFixed(1)}h</strong> <span class="text-xs">(${max.date})</span></span>
-                <span class="text-sm">Min: <strong>${(min.sleepMinutes / 60).toFixed(1)}h</strong> <span class="text-xs">(${min.date})</span></span>
-            </div>
-        `;
+        const formatRangeDate = (dateStr) => {
+            if (!dateStr) return '';
+            if (currentPeriod === 'monthly') return dateStr.slice(0, 7);
+            return dateStr;
+        };
+
+        let max = null;
+        let min = null;
+        validRows.forEach(entry => {
+            const val = safeNumber(entry.sleepMinutes);
+            if (val === null) return;
+            if (!max || val > max.sleepMinutes || (val === max.sleepMinutes && entry.date > max.date)) {
+                max = entry;
+            }
+            if (!min || val < min.sleepMinutes || (val === min.sleepMinutes && entry.date < min.date)) {
+                min = entry;
+            }
+        });
+
+        if (max && min) {
+            const maxDate = formatRangeDate(max.date);
+            const minDate = formatRangeDate(min.date);
+            bestWorstHtml = `
+                <div class="stat-block">
+                    <span class="text-sm">Max: <strong>${(max.sleepMinutes / 60).toFixed(1)}h</strong> <span class="text-xs">(${maxDate})</span></span>
+                    <span class="text-sm">Min: <strong>${(min.sleepMinutes / 60).toFixed(1)}h</strong> <span class="text-xs">(${minDate})</span></span>
+                </div>
+            `;
+        }
     }
 
     // Coverage
@@ -2911,6 +2932,10 @@ function initRepairRecentDays() {
         };
         window.__REPAIR_DONE__ = donePayload;
         document.documentElement.dataset.repairDone = "1";
+        window.REPAIR_DONE = true;
+        if (document && document.body) {
+            document.body.setAttribute('data-repair-done', '1');
+        }
         console.log(`[repair] done ok=${state.ok} errors=${state.errors} skipped=${state.skipped} repaired=${state.repaired} ms=${ms}`);
         state.progress = `Done ${limit} of ${limit}`;
         renderStatus(state);
@@ -3009,6 +3034,9 @@ function initSanityAutorun() {
         const ok = errorCount === 0 ? 1 : 0;
         window.SANITY_DONE = true;
         document.documentElement.dataset.sanityDone = "1";
+        if (document && document.body) {
+            document.body.setAttribute('data-sanity-done', '1');
+        }
         console.log(`[sanity] done ok=${ok} errors=${errorCount} ms=${ms}`);
         window.removeEventListener('error', onRuntimeError);
         window.removeEventListener('unhandledrejection', onRuntimeError);
