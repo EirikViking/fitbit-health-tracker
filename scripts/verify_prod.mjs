@@ -351,8 +351,8 @@ async function main() {
     await browser.close();
     process.exit(1);
   }
-  if (!parsed.exportMeta || parsed.exportMeta.estimatedExcludedFromExport !== true || !parsed.features || parsed.body === undefined || parsed.health === undefined) {
-    console.error('exportMeta missing or new sections absent', parsed.exportMeta);
+  if (!parsed.exportMeta || parsed.exportMeta.estimatedExcludedFromExport !== true) {
+    console.error('exportMeta missing or estimatedExcludedFromExport not true');
     await browser.close();
     process.exit(1);
   }
@@ -397,6 +397,20 @@ async function main() {
   const dates = (selectedParsed.rows || []).map(r => r.date).filter(Boolean);
   if (!(dates.some(d => d.startsWith('2025')) && dates.some(d => d.startsWith('2026')))) {
     console.error('Selected export missing span across years');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // AI bundle export shape
+  const aiResp = await page.request.get('/api/export/ai');
+  if (aiResp.status() !== 200) {
+    console.error('AI export failed', aiResp.status());
+    await browser.close();
+    process.exit(1);
+  }
+  const aiJson = await aiResp.json();
+  if (!aiJson.features || aiJson.body === undefined || aiJson.health === undefined) {
+    console.error('AI export missing required sections', Object.keys(aiJson));
     await browser.close();
     process.exit(1);
   }
