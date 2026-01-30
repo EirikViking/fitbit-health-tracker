@@ -818,6 +818,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (periodToggle) {
         const rangePicker = document.createElement('div');
         rangePicker.className = 'range-picker';
+        rangePicker.setAttribute('data-testid', 'period-select');
         rangePicker.innerHTML = `
             <span class="range-picker-label">Period:</span>
             <button class="range-btn" data-range="7d">7 Days</button>
@@ -892,7 +893,7 @@ document.addEventListener('DOMContentLoaded', () => {
         compareToggle.className = 'compare-toggle-container';
         compareToggle.innerHTML = `
             <span class="compare-toggle-label">Compare Mode:</span>
-            <div id="compareToggle" class="toggle-switch ${compareMode ? 'active' : ''}" title="Toggle comparison view"></div>
+            <div id="compareToggle" class="toggle-switch ${compareMode ? 'active' : ''}" data-testid="compare-toggle" title="Toggle comparison view"></div>
             <span class="text-xs text-secondary">Compare current vs previous period</span>
         `;
 
@@ -1995,6 +1996,12 @@ function renderKPIs(data) {
     const kpiGrid = $('overviewKPIs');
     if (!kpiGrid || !data) return;
 
+    if (compareMode) {
+        kpiGrid.setAttribute('data-testid', 'compare-panel');
+    } else {
+        kpiGrid.removeAttribute('data-testid');
+    }
+
     const rows = normalizeForPeriod(data, 'daily') || [];
     if (rows.length === 0) {
         kpiGrid.innerHTML = '<p style="grid-column:1/-1;color:var(--text-secondary);">No data available for insights.</p>';
@@ -2481,7 +2488,7 @@ function renderActivityTab(data) {
                  <div class="kpi-title">Steps</div>
                  <div class="text-xs text-secondary">Data days: ${dayLabel}</div>
             </div>
-            <div class="kpi-value">${(steps / 1000).toFixed(1)}k</div>
+            <div class="kpi-value" data-testid="totals-steps">${(steps / 1000).toFixed(1)}k</div>
             <div class="text-sm">Period Total (${periodLabel})</div>
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(steps / count).toLocaleString()}/day</div>` : ''}
             ${createTooltip('steps')}

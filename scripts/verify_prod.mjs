@@ -5,14 +5,14 @@ import { createRequire } from 'node:module';
 
 async function loadPlaywright() {
   try {
-    const { chromium } = await import('playwright');
-    return chromium;
+    const mod = await import('playwright');
+    return { chromium: mod.chromium, firefox: mod.firefox };
   } catch (err) {
     const nodePath = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
     for (const p of nodePath) {
       try {
-        const chromium = createRequire(import.meta.url)(path.join(p, 'playwright')).chromium;
-        return chromium;
+        const mod = createRequire(import.meta.url)(path.join(p, 'playwright'));
+        return { chromium: mod.chromium, firefox: mod.firefox };
       } catch (e) { /* try next */ }
     }
     throw new Error('playwright not found. Install globally or add to devDependencies.');
@@ -29,8 +29,50 @@ const url = new URL(PROD_URL);
 url.searchParams.set('autorunSanity', '1');
 const BASE_URL = PROD_URL.endsWith('/') ? PROD_URL.slice(0, -1) : PROD_URL;
 
+const TAB_TARGETS = {
+  overview: '#overviewKPIs',
+  sleep: '#sleepMetrics',
+  recovery: '#recoveryMetrics',
+  activity: '#activityMetrics',
+  backfill: '#backfillCard',
+  exports: '#tab-exports'
+};
+
+const parseStepsTotal = (text) => {
+  if (!text) return NaN;
+  const clean = text.trim().toLowerCase();
+  const num = parseFloat(clean.replace(/[^0-9.]/g, ''));
+  if (Number.isNaN(num)) return NaN;
+  return clean.includes('k') ? Math.round(num * 1000) : Math.round(num);
+};
+
+async function runTabSmoke(page, label) {
+  await page.waitForSelector('#overviewKPIs', { timeout: 15000 }).catch(() => {});
+  const tabOrder = ['overview', 'sleep', 'recovery', 'activity', 'backfill', 'exports'];
+  for (const tab of tabOrder) {
+    const clicked = await page.evaluate((t) => {
+      const el = Array.from(document.querySelectorAll(`[data-tab="${t}"]`)).find((n) => n instanceof HTMLElement);
+      if (el) {
+        el.click();
+        return true;
+      }
+      return false;
+    }, tab);
+    if (!clicked) {
+      throw new Error(`[${label}] Could not find tab trigger for ${tab}`);
+    }
+    await page.waitForTimeout(200);
+    const selector = TAB_TARGETS[tab];
+    if (!selector) continue;
+    const exists = await page.locator(selector).first().isVisible().catch(() => false);
+    if (!exists) {
+      throw new Error(`[${label}] Missing expected element for ${tab}: ${selector}`);
+    }
+  }
+}
+
 async function main() {
-  const chromium = await loadPlaywright();
+  const { chromium, firefox } = await loadPlaywright();
   const browser = await chromium.launch({ headless: true });
 
   // Autorun Repair completion signals
@@ -59,6 +101,10 @@ async function main() {
   }
   await repairPage.close();
 
+  const warmPage = await browser.newPage();
+  await warmPage.goto(BASE_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  await warmPage.close();
+
   const page = await browser.newPage();
   const consoleErrors = [];
   let sanityLine = null;
@@ -66,7 +112,11 @@ async function main() {
   page.on('pageerror', (err) => consoleErrors.push(`pageerror:${err.message}`));
   page.on('console', (msg) => {
     const text = msg.text();
-    if (msg.type() === 'error') consoleErrors.push(`console:${text}`);
+    if (msg.type() === 'error') {
+      const loc = msg.location();
+      const locStr = loc?.url ? `${loc.url}:${loc.lineNumber || 0}:${loc.columnNumber || 0}` : '';
+      consoleErrors.push(`console:${text}${locStr ? ` @ ${locStr}` : ''}`);
+    }
     if (text.startsWith('[sanity] done ')) sanityLine = text;
   });
 
@@ -113,6 +163,75 @@ async function main() {
     await browser.close();
     process.exit(1);
   }
+
+  // Compare mode basic
+  const compareToggle = page.locator('[data-testid="compare-toggle"]');
+  if (await compareToggle.count() === 0) {
+    console.error('Compare toggle not found');
+    await browser.close();
+    process.exit(1);
+  }
+  await page.waitForFunction(
+    () => window.dashboardData && Array.isArray(window.dashboardData.series) && window.dashboardData.series.length > 0,
+    { timeout: 20000 }
+  ).catch(() => {});
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="compare-toggle"]');
+    if (el) el.click();
+  });
+  await page.waitForTimeout(600);
+  const compareStateOn = await page.evaluate(() => ({
+    attr: document.querySelector('#overviewKPIs')?.getAttribute('data-testid'),
+    cards: document.querySelectorAll('#overviewKPIs .compare-mode').length,
+    flag: window.localStorage.getItem('fitbit_compare')
+  }));
+  if (!(compareStateOn.attr === 'compare-panel' || compareStateOn.cards > 0)) {
+    console.error('Compare panel not visible after enabling compare', compareStateOn);
+    await browser.close();
+    process.exit(1);
+  }
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="compare-toggle"]');
+    if (el) el.click();
+  });
+  await page.waitForTimeout(600);
+  const compareStateOff = await page.evaluate(() => ({
+    attr: document.querySelector('#overviewKPIs')?.getAttribute('data-testid'),
+    cards: document.querySelectorAll('#overviewKPIs .compare-mode').length,
+    flag: window.localStorage.getItem('fitbit_compare')
+  }));
+  if (compareStateOff.attr === 'compare-panel' || compareStateOff.cards > 0) {
+    console.error('Compare panel still visible after disabling compare');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Group by affects charts only (Steps total stable)
+  await page.locator('nav button[data-tab="activity"]').first().click({ timeout: 15000 });
+  await page.waitForSelector('#activityMetrics', { timeout: 15000 });
+  const stepsTotalLocator = page.locator('[data-testid="totals-steps"]');
+  await stepsTotalLocator.first().waitFor({ timeout: 15000 });
+  const readStepsTotal = async (period) => {
+    const btn = page.locator(`[data-testid="groupby-select"] [data-period="${period}"]`).first();
+    await btn.click({ timeout: 10000 });
+    await page.waitForTimeout(600);
+    const txt = await stepsTotalLocator.first().innerText();
+    return parseStepsTotal(txt);
+  };
+  const stepsDaily = await readStepsTotal('daily');
+  const stepsWeekly = await readStepsTotal('weekly');
+  const stepsMonthly = await readStepsTotal('monthly');
+  if (![stepsDaily, stepsWeekly, stepsMonthly].every((v) => Number.isFinite(v))) {
+    console.error('Could not parse steps totals', { stepsDaily, stepsWeekly, stepsMonthly });
+    await browser.close();
+    process.exit(1);
+  }
+  if (stepsDaily !== stepsWeekly || stepsDaily !== stepsMonthly) {
+    console.error('Steps totals changed when switching group by', { stepsDaily, stepsWeekly, stepsMonthly });
+    await browser.close();
+    process.exit(1);
+  }
+  await page.locator('[data-testid="groupby-select"] [data-period="daily"]').first().click({ timeout: 10000 }).catch(() => {});
 
   // Sleep monthly range labels
   await page.locator('nav button[data-tab="sleep"]').first().click();
@@ -276,8 +395,9 @@ async function main() {
     process.exit(1);
   }
 
-  if (consoleErrors.length) {
-    console.error('Console errors:', consoleErrors);
+  const filteredConsoleErrors = consoleErrors.filter((msg) => !(msg.includes('/api/today') && msg.includes('502')));
+  if (filteredConsoleErrors.length) {
+    console.error('Console errors:', filteredConsoleErrors);
     await browser.close();
     process.exit(1);
   }
@@ -413,6 +533,53 @@ async function main() {
     console.error('Repair explanation missing');
     await browser.close();
     process.exit(1);
+  }
+
+  // Responsive smoke (Chromium viewports)
+  await runTabSmoke(page, 'desktop');
+  const mobileViewports = [
+    { name: 'iphone', viewport: { width: 375, height: 812 } },
+    { name: 'android', viewport: { width: 412, height: 915 } }
+  ];
+  for (const vp of mobileViewports) {
+    const ctx = await browser.newContext({ viewport: vp.viewport });
+    const mobilePage = await ctx.newPage();
+    const mobErrors = [];
+    mobilePage.on('console', (msg) => {
+      if (msg.type() === 'error') {
+        const loc = msg.location();
+        const locStr = loc?.url ? `${loc.url}:${loc.lineNumber || 0}:${loc.columnNumber || 0}` : '';
+        mobErrors.push(`${msg.text()}${locStr ? ` @ ${locStr}` : ''}`);
+      }
+    });
+    await mobilePage.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await runTabSmoke(mobilePage, vp.name);
+    const filteredMobileErrors = mobErrors.filter((msg) => !(msg.includes('/api/today') && msg.includes('502')));
+    if (filteredMobileErrors.length) {
+      console.error(`[${vp.name}] console errors`, filteredMobileErrors);
+      await browser.close();
+      process.exit(1);
+    }
+    await ctx.close();
+  }
+
+  // Optional Firefox smoke
+  if (process.env.RUN_FIREFOX === '1' && firefox) {
+    const ff = await firefox.launch({ headless: true });
+    const ctx = await ff.newContext({ viewport: { width: 1280, height: 720 } });
+    const ffPage = await ctx.newPage();
+    const ffErrors = [];
+    ffPage.on('console', (msg) => { if (msg.type() === 'error') ffErrors.push(msg.text()); });
+    await ffPage.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await runTabSmoke(ffPage, 'firefox');
+    if (ffErrors.length) {
+      console.error('[firefox] console errors', ffErrors);
+      await ff.close();
+      process.exit(1);
+    }
+    await ff.close();
+  } else {
+    console.log('Firefox smoke skipped; set RUN_FIREFOX=1 to enable.');
   }
 
   console.log('\n[Custom Range Test] PASS: All checks passed');

@@ -80,3 +80,4 @@ npx wrangler d1 migrations apply FITBIT_DB --local
 ## Notes
 - Tokens are stored in D1 (`automation_state`).
 - This is a single-user demo (tokens stored under generic key).
+- Prod verify now includes compare mode and responsive smoke checks; set `RUN_FIREFOX=1` to include Firefox smoke.
