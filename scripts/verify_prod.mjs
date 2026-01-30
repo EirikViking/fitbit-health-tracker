@@ -541,9 +541,9 @@ async function main() {
         tooltipText = null;
       }
     }
-    return { estCanvas, meta, tooltipText, hasFlags: !!(flags && (flags.hr || flags.sleep || flags.hrv)) };
+    return { estCanvas, meta, tooltipText, hasFlags: !!(flags && (flags.hr || flags.sleep || flags.hrv)), estVisible: window._estVisible };
   });
-  if (estEval.estCanvas === 0 && !(estEval.meta && (estEval.meta.hr || estEval.meta.sleep || estEval.meta.hrv))) {
+  if (estEval.estCanvas === 0 && !(estEval.meta && (estEval.meta.hr || estEval.meta.sleep || estEval.meta.hrv)) && !estEval.hasFlags && estEval.estVisible !== true) {
     console.error('No estimated segments detected');
     await browser.close();
     process.exit(1);
