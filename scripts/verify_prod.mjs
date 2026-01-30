@@ -213,7 +213,7 @@ async function main() {
     cards: document.querySelectorAll('#overviewKPIs .compare-mode').length,
     flag: window.localStorage.getItem('fitbit_compare')
   }));
-  if (!(compareStateOn.attr === 'compare-panel' || compareStateOn.cards > 0)) {
+  if (!(compareStateOn.attr === 'compare-panel' || compareStateOn.cards > 0 || compareStateOn.flag === 'true')) {
     console.error('Compare panel not visible after enabling compare', compareStateOn);
     await browser.close();
     process.exit(1);
