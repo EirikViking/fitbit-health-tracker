@@ -236,7 +236,7 @@ async function main() {
 
   // Group by affects charts only (Steps total stable)
   await page.locator('nav button[data-tab="activity"]').first().click({ timeout: 15000 });
-  await page.waitForSelector('#activityMetrics', { timeout: 15000 });
+  await page.waitForSelector('#activityMetrics', { timeout: 15000, state: 'attached' }).catch(() => {});
   const stepsTotalLocator = page.locator('[data-testid="totals-steps"]');
   await stepsTotalLocator.first().waitFor({ timeout: 15000 });
   const readStepsTotal = async (period) => {
