@@ -662,6 +662,8 @@ async function main() {
 
   // Primary cards exist after range changes
   await page.locator('nav button[data-tab="overview"]').click();
+  await page.locator('[data-testid="period-90"]').click();
+  await page.waitForTimeout(500);
   const cardsAfter90 = await page.locator('#overviewKPIs .kpi-card').count();
   await page.locator('[data-testid="period-7"]').click();
   await page.waitForTimeout(400);
