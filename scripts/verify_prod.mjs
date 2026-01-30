@@ -241,6 +241,7 @@ async function main() {
   await stepsTotalLocator.first().waitFor({ timeout: 15000, state: 'attached' }).catch(() => {});
   const readStepsTotal = async (period) => {
     const btn = page.locator(`[data-testid="groupby-select"] [data-period="${period}"]`).first();
+    if (await btn.isDisabled().catch(() => false)) return null;
     await btn.click({ timeout: 10000 });
     await page.waitForTimeout(600);
     try {
