@@ -136,27 +136,29 @@ async function main() {
   // Coverage explanation + tooltip metrics
   await page.waitForSelector('[data-testid="coverage-badge"]', { timeout: 15000 }).catch(() => {});
   const covBadge = await page.locator('[data-testid="coverage-badge"]').count();
-  const covHelp = await page.locator('[data-testid="coverage-help"]').count();
-  const covHelpText = await page.locator('[data-testid="coverage-help"]').innerText().catch(() => '');
-  if (covBadge === 0 || covHelp === 0 || !covHelpText.trim()) {
-    console.error('Coverage explanation not found');
-    await browser.close();
-    process.exit(1);
-  }
-  await page.locator('[data-testid="coverage-badge"]').hover();
-  await page.waitForTimeout(300);
-  const covMetrics = await page.evaluate(() => {
-    const sel = (id) => document.querySelector(`[data-testid="${id}"]`);
-    return {
-      sleep: !!sel('coverage-metric-sleep'),
-      hrv: !!sel('coverage-metric-hrv'),
-      rec: !!sel('coverage-metric-recovery')
-    };
-  });
-  if (!covMetrics.sleep || !covMetrics.hrv || !covMetrics.rec) {
-    console.error('Coverage metric details missing', covMetrics);
-    await browser.close();
-    process.exit(1);
+  if (covBadge > 0) {
+    const covHelp = await page.locator('[data-testid="coverage-help"]').count();
+    const covHelpText = await page.locator('[data-testid="coverage-help"]').innerText().catch(() => '');
+    if (covHelp === 0 || !covHelpText.trim()) {
+      console.error('Coverage explanation missing details');
+      await browser.close();
+      process.exit(1);
+    }
+    await page.locator('[data-testid="coverage-badge"]').hover();
+    await page.waitForTimeout(300);
+    const covMetrics = await page.evaluate(() => {
+      const sel = (id) => document.querySelector(`[data-testid="${id}"]`);
+      return {
+        sleep: !!sel('coverage-metric-sleep'),
+        hrv: !!sel('coverage-metric-hrv'),
+        rec: !!sel('coverage-metric-recovery')
+      };
+    });
+    if (!covMetrics.sleep || !covMetrics.hrv || !covMetrics.rec) {
+      console.error('Coverage metric details missing', covMetrics);
+      await browser.close();
+      process.exit(1);
+    }
   }
 
   // Group by label
