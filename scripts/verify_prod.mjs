@@ -641,7 +641,7 @@ async function main() {
   }
 
   // Optional Firefox smoke
-  if (process.env.RUN_FIREFOX === '1' && firefox) {
+  if (process.env.RUN_FIREFOX !== '0' && firefox) {
     const ff = await firefox.launch({ headless: true });
     const ctx = await ff.newContext({ viewport: { width: 1280, height: 720 } });
     const ffPage = await ctx.newPage();

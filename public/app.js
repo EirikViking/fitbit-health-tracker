@@ -5,6 +5,11 @@ let dashboardData = null;
 let bodyData = null;
 let healthData = null;
 let featureSupport = null;
+
+function expectedDaysCurrentRange() {
+    if (rangeStartDate && rangeEndDate) return daysBetweenInclusive(rangeStartDate, rangeEndDate);
+    return 90;
+}
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
 let viewMode = 'calendar';
 let repairState = null;
@@ -2636,6 +2641,7 @@ function renderHealthTab(health, support) {
     const metrics = (health && health.metrics) || {};
     const featureMap = (support && support.features) || support || {};
     const metricKeys = Object.keys(metrics).filter(k => Array.isArray(metrics[k]) && metrics[k].length > 0);
+    const expectedDays = expectedDaysCurrentRange();
 
     if (metricKeys.length === 0) {
         const unsupported = Object.entries(featureMap).filter(([, v]) => !v?.supported).map(([k]) => k);
@@ -2661,6 +2667,7 @@ function renderHealthTab(health, support) {
                 <div class="kpi-title">${label}</div>
                 <div class="kpi-value">${val} ${unit}</div>
                 <div class="kpi-meta text-xs">Latest: ${last.date}</div>
+                <canvas id="spark-${key}" height="80"></canvas>
             </div>
         `;
     }).join('');
@@ -2671,8 +2678,40 @@ function renderHealthTab(health, support) {
         <div class="kpi-grid">
             ${cards}
         </div>
+        <div class="text-xs text-secondary" style="margin-top:0.5rem;" data-testid="coverage-label">
+            Loaded: ${Object.values(metrics).flat().map(m => m.date).filter((v, i, arr) => arr.indexOf(v) === i).length || 0} of ${expectedDays} days
+        </div>
         ${unsupported.length ? `<div class="text-xs text-secondary" style="margin-top:0.5rem;">Not available: ${unsupported.join(', ')}</div>` : ''}
     `;
+
+    // Mini sparklines
+    metricKeys.forEach((key) => {
+        const series = metrics[key];
+        const canvas = document.getElementById(`spark-${key}`);
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const labels = series.map(s => s.date.slice(5));
+        const dataVals = series.map(s => s.value ?? null);
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    data: dataVals,
+                    fill: false,
+                    borderColor: '#0ea5e9',
+                    tension: 0.2,
+                    pointRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { x: { display: false }, y: { display: false } },
+                plugins: { legend: { display: false }, tooltip: { enabled: false } }
+            }
+        });
+    });
 }
 
 async function refreshAncillaryData() {
