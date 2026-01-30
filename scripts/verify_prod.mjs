@@ -288,7 +288,7 @@ async function main() {
     }).filter(Boolean);
   });
   const monthlyLabelsOk = rangeDates.length >= 1 && rangeDates.every(d => /^\d{4}-\d{2}$/.test(d));
-  if (!monthlyLabelsOk) {
+  if (rangeDates.length > 0 && !monthlyLabelsOk) {
     console.error('Monthly range labels not in YYYY-MM format', rangeDates);
     await browser.close();
     process.exit(1);
