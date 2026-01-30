@@ -164,6 +164,16 @@ async function main() {
     process.exit(1);
   }
 
+  // Period buttons test ids exist
+  const periodIds = ['period-7', 'period-30', 'period-90', 'period-ytd', 'period-alltime'];
+  for (const pid of periodIds) {
+    if (await page.locator(`[data-testid=\"${pid}\"]`).count() === 0) {
+      console.error('Missing period test id', pid);
+      await browser.close();
+      process.exit(1);
+    }
+  }
+
   // Compare mode basic
   const compareToggle = page.locator('[data-testid="compare-toggle"]');
   if (await compareToggle.count() === 0) {
@@ -232,6 +242,17 @@ async function main() {
     process.exit(1);
   }
   await page.locator('[data-testid="groupby-select"] [data-period="daily"]').first().click({ timeout: 10000 }).catch(() => {});
+  // Group by monthly disabled for short range
+  await page.locator('[data-testid="period-7"]').click();
+  await page.waitForTimeout(300);
+  const monthlyBtn = page.locator('[data-period="monthly"]');
+  const monthlyDisabled = await monthlyBtn.isDisabled().catch(() => false);
+  if (!monthlyDisabled) {
+    console.error('Monthly group by should be disabled for 7d range');
+    await browser.close();
+    process.exit(1);
+  }
+  await page.locator('[data-testid="period-alltime"]').click();
 
   // Sleep monthly range labels
   await page.locator('nav button[data-tab="sleep"]').first().click();
@@ -253,6 +274,13 @@ async function main() {
     process.exit(1);
   }
   await page.locator('[data-period="daily"]').first().click({ force: true }).catch(() => {});
+  await page.locator('[data-testid="period-90"]').click();
+  const coverageText = await page.locator('[data-testid="coverage-label"]').first().innerText().catch(() => '');
+  if (!/Loaded:\s*\d+\s+of\s+90\s+days/i.test(coverageText)) {
+    console.error('90d coverage label missing or incorrect', coverageText);
+    await browser.close();
+    process.exit(1);
+  }
 
   // Estimated toggle OFF/ON
   await page.locator('nav button[data-tab="recovery"]').click();
@@ -315,8 +343,8 @@ async function main() {
     await browser.close();
     process.exit(1);
   }
-  if (!parsed.exportMeta || parsed.exportMeta.estimatedExcludedFromExport !== true) {
-    console.error('exportMeta missing or estimatedExcludedFromExport not true');
+  if (!parsed.exportMeta || parsed.exportMeta.estimatedExcludedFromExport !== true || !parsed.features || parsed.body === undefined || parsed.health === undefined) {
+    console.error('exportMeta missing or new sections absent', parsed.exportMeta);
     await browser.close();
     process.exit(1);
   }
@@ -519,18 +547,48 @@ async function main() {
   // Active mins deterministic
   const activeCard = page.locator('.kpi-card', { hasText: 'Active Mins' });
   if (await activeCard.count() > 0) {
-    const activeText = await activeCard.innerText();
-    if (!(activeText.includes('Not supported') || /\b0\b/.test(activeText))) {
-      console.error('Active mins not in expected state', activeText);
-      await browser.close();
-      process.exit(1);
-    }
+    console.error('Active mins card should not be present');
+    await browser.close();
+    process.exit(1);
   }
 
   // Repair explanation present
   const repairText = await page.locator('.text-secondary', { hasText: 'Repair calls /api/day' }).count();
-  if (repairText === 0) {
-    console.error('Repair explanation missing');
+  if (repairText > 0) {
+    console.error('Repair explanation should not appear outside repair tab');
+    await browser.close();
+    process.exit(1);
+  }
+
+  // Body / Health tabs basic smoke
+  await page.locator('[data-testid="tab-body"]').first().click({ timeout: 15000 });
+  await page.waitForTimeout(300);
+  const bodyErrors = consoleErrors.filter(e => e.toLowerCase().includes('body'));
+  const bodyEmpty = await page.locator('#bodyContent .empty-state').count();
+  const bodyCard = await page.locator('[data-testid="body-weight-card"]').count();
+  if (bodyErrors.length) {
+    console.error('Body tab console errors', bodyErrors);
+    await browser.close();
+    process.exit(1);
+  }
+  if (bodyEmpty === 0 && bodyCard === 0) {
+    console.error('Body tab missing both empty state and card');
+    await browser.close();
+    process.exit(1);
+  }
+
+  await page.locator('[data-testid="tab-health"]').first().click({ timeout: 15000 });
+  await page.waitForTimeout(300);
+  const healthErrors = consoleErrors.filter(e => e.toLowerCase().includes('health'));
+  const healthEmpty = await page.locator('#healthContent .empty-state').count();
+  const healthCard = await page.locator('[data-testid^="health-metric-card"]').count();
+  if (healthErrors.length) {
+    console.error('Health tab console errors', healthErrors);
+    await browser.close();
+    process.exit(1);
+  }
+  if (healthEmpty === 0 && healthCard === 0) {
+    console.error('Health tab missing both empty state and cards');
     await browser.close();
     process.exit(1);
   }
