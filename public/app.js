@@ -2,6 +2,9 @@
 // State
 let charts = {};
 let dashboardData = null;
+let bodyData = null;
+let healthData = null;
+let featureSupport = null;
 let currentPeriod = localStorage.getItem('fitbit_period') || "daily";
 let viewMode = 'calendar';
 let repairState = null;
@@ -239,7 +242,7 @@ function setRange(rangeType, shouldRender = true) {
     rangeEndDate = endDate;
 
     // Auto-adjust group by based on range length
-    const rangeDays = startDate && endDate ? daysBetween(startDate, endDate) + 1 : null;
+    const rangeDays = startDate && endDate ? daysBetweenInclusive(startDate, endDate) : null;
     const validPeriods = [];
     if (rangeDays === null || rangeDays <= 14) {
         validPeriods.push('daily');
@@ -292,6 +295,7 @@ function setRange(rangeType, shouldRender = true) {
     // Re-render with filtered data
     if (shouldRender && dashboardData) {
         renderAll();
+        refreshAncillaryData();
     }
 }
 
@@ -344,6 +348,7 @@ function setCustomRange(fromDate, toDate) {
     // Re-render with custom range
     if (dashboardData) {
         renderAll();
+        refreshAncillaryData();
     }
 }
 
@@ -844,11 +849,11 @@ document.addEventListener('DOMContentLoaded', () => {
         rangePicker.setAttribute('data-testid', 'period-select');
         rangePicker.innerHTML = `
             <span class="range-picker-label">Period:</span>
-            <button class="range-btn" data-range="7d">7 Days</button>
-            <button class="range-btn" data-range="30d">30 Days</button>
-            <button class="range-btn" data-range="90d">90 Days</button>
-            <button class="range-btn" data-range="ytd">YTD</button>
-            <button class="range-btn" data-range="all">All Time</button>
+            <button class="range-btn" data-range="7d" data-testid="period-7">7 Days</button>
+            <button class="range-btn" data-range="30d" data-testid="period-30">30 Days</button>
+            <button class="range-btn" data-range="90d" data-testid="period-90">90 Days</button>
+            <button class="range-btn" data-range="ytd" data-testid="period-ytd">YTD</button>
+            <button class="range-btn" data-range="all" data-testid="period-alltime">All Time</button>
             <span id="rangeDisplay" class="range-display">All available data</span>
         `;
         periodToggle.insertAdjacentElement('afterend', rangePicker);
@@ -1046,6 +1051,8 @@ window.renderAll = function () {
     renderSleepTab(filteredData);
     renderRecoveryTab(filteredData);
     renderActivityTab(filteredData);
+    renderBodyTab(bodyData);
+    renderHealthTab(healthData, featureSupport);
     renderExportTab(filteredData); // Ensure exports updated
 };
 
@@ -1268,8 +1275,15 @@ async function loadDashboard() {
         if (!histRes.ok) throw new Error('Failed to fetch history');
         const data = await histRes.json();
 
+        // Fetch body/health/features in parallel (non-blocking for UI)
+        const rangeDays = currentRange === 'all' ? 90 : (rangeStartDate && rangeEndDate ? daysBetween(rangeStartDate, rangeEndDate) + 1 : 30);
+        const bodyPromise = fetch(`/api/body?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : null).catch(() => null);
+        const healthPromise = fetch(`/api/health?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : null).catch(() => null);
+        const featuresPromise = fetch(`/api/features`).then(r => r.ok ? r.json() : null).catch(() => null);
+
         // Store dashboard data globally
         dashboardData = data;
+        [bodyData, healthData, featureSupport] = await Promise.all([bodyPromise, healthPromise, featuresPromise]);
 
         // Log counts
         const seriesLen = Array.isArray(data.series) ? data.series.length : 0;
@@ -2471,8 +2485,6 @@ function renderActivityTab(data) {
     const count = dailyRows.length;
     const steps = dailyRows.reduce((sum, r) => sum + (safeNumber(r.steps) || 0), 0);
     const cals = dailyRows.reduce((sum, r) => sum + (safeNumber(r.caloriesOut) || 0), 0);
-    const azm = dailyRows.reduce((sum, r) => sum + (safeNumber(r.azm) || 0), 0);
-    const azmNonNull = dailyRows.filter(r => safeNumber(r.azm) !== null);
     const hasSignals = steps > 0 || cals > 0;
 
     // Coverage
@@ -2569,6 +2581,111 @@ function renderActivityTab(data) {
         },
         options: createChartOptions('steps', rows)
     });
+}
+
+function renderBodyTab(body) {
+    const container = $('bodyContent');
+    if (!container) return;
+    if (!body || !Array.isArray(body.rows) || body.rows.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">⚖️</div>
+                <h3 class="empty-state-title">No weight logs found</h3>
+                <p class="empty-state-text">Add weight logs in Fitbit to see trends here.</p>
+            </div>
+        `;
+        return;
+    }
+    const rows = body.rows;
+    const coverage = body.coverage || {};
+    const latest = rows[rows.length - 1];
+    const first = rows[0];
+    const delta = (latest.weightKg !== null && first.weightKg !== null) ? (latest.weightKg - first.weightKg) : null;
+    const changeLabel = delta === null ? '--' : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} kg`;
+
+    const fmt = (v, unit = '') => (v === null || v === undefined) ? '--' : `${v}${unit}`;
+
+    container.innerHTML = `
+        <div class="kpi-grid">
+            <div class="kpi-card" data-testid="body-weight-card">
+                <div class="kpi-title">Latest Weight</div>
+                <div class="kpi-value">${fmt(latest.weightKg ? latest.weightKg.toFixed(1) : null, ' kg')}</div>
+                <div class="kpi-meta text-xs">Change vs start: ${changeLabel}</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-title">Body Fat</div>
+                <div class="kpi-value">${fmt(latest.fatPct ? latest.fatPct.toFixed(1) : null, ' %')}</div>
+                <div class="kpi-meta text-xs">BMI: ${fmt(latest.bmi ? latest.bmi.toFixed(1) : null)}</div>
+            </div>
+        </div>
+        <div class="text-xs text-secondary" data-testid="coverage-label" style="margin-top:0.5rem;">
+            Loaded: ${coverage.daysWithAny || 0} of ${coverage.expectedDays || rows.length} days
+        </div>
+    `;
+}
+
+function renderHealthTab(health, support) {
+    const container = $('healthContent');
+    if (!container) return;
+    const metrics = (health && health.metrics) || {};
+    const featureMap = (support && support.features) || support || {};
+    const metricKeys = Object.keys(metrics).filter(k => Array.isArray(metrics[k]) && metrics[k].length > 0);
+
+    if (metricKeys.length === 0) {
+        const unsupported = Object.entries(featureMap).filter(([, v]) => !v?.supported).map(([k]) => k);
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">🩺</div>
+                <h3 class="empty-state-title">No health metrics found</h3>
+                <p class="empty-state-text">We’ll show cardio fitness, SpO₂, temperature, breathing, water, or food logs when available.</p>
+                ${unsupported.length ? `<p class="text-xs text-secondary">Not available for this account: ${unsupported.join(', ')}</p>` : ''}
+            </div>
+        `;
+        return;
+    }
+
+    const cards = metricKeys.map((key) => {
+        const series = metrics[key];
+        const last = series[series.length - 1];
+        const label = key.charAt(0).toUpperCase() + key.slice(1);
+        const unit = last.unit || '';
+        const val = (last.value !== null && last.value !== undefined) ? last.value : '--';
+        return `
+            <div class="kpi-card" data-testid="health-metric-card-${key}">
+                <div class="kpi-title">${label}</div>
+                <div class="kpi-value">${val} ${unit}</div>
+                <div class="kpi-meta text-xs">Latest: ${last.date}</div>
+            </div>
+        `;
+    }).join('');
+
+    const unsupported = Object.entries(featureMap).filter(([, v]) => !v?.supported).map(([k]) => k);
+
+    container.innerHTML = `
+        <div class="kpi-grid">
+            ${cards}
+        </div>
+        ${unsupported.length ? `<div class="text-xs text-secondary" style="margin-top:0.5rem;">Not available: ${unsupported.join(', ')}</div>` : ''}
+    `;
+}
+
+async function refreshAncillaryData() {
+    const to = rangeEndDate || getOsloTodayISO();
+    const from = rangeStartDate || addDaysISO(to, -29);
+    try {
+        const [bodyRes, healthRes, featureRes] = await Promise.all([
+            fetch(`/api/body?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch(`/api/health?from=${from}&to=${to}`).then(r => r.ok ? r.json() : null).catch(() => null),
+            featureSupport ? Promise.resolve(featureSupport) : fetch(`/api/features`).then(r => r.ok ? r.json() : null).catch(() => null)
+        ]);
+        bodyData = bodyRes || bodyData;
+        healthData = healthRes || healthData;
+        featureSupport = featureRes || featureSupport;
+        renderBodyTab(bodyData);
+        renderHealthTab(healthData, featureSupport);
+    } catch (e) {
+        console.error('Failed to refresh ancillary data', e);
+    }
 }
 
 function renderExportTab(data) {

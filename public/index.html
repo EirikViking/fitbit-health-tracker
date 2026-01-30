@@ -56,6 +56,12 @@
         <button class="nav-btn" data-tab="activity" onclick="switchTab('activity')">
           <span class="nav-icon">•</span> Activity
         </button>
+        <button class="nav-btn" data-tab="body" data-testid="tab-body" onclick="switchTab('body')">
+          <span class="nav-icon">•</span> Body
+        </button>
+        <button class="nav-btn" data-tab="health" data-testid="tab-health" onclick="switchTab('health')">
+          <span class="nav-icon">•</span> Health
+        </button>
         <button class="nav-btn" data-tab="backfill" onclick="switchTab('backfill')">
           <span class="nav-icon">•</span> Repair
         </button>
@@ -147,6 +153,12 @@
       <!-- Activity Tab -->
       <div id="tab-activity" class="tab-pane">
         <div id="activityMetrics" class="kpi-grid"></div>
+      </div>
+      <div id="tab-body" class="tab-pane">
+        <div id="bodyContent"></div>
+      </div>
+      <div id="tab-health" class="tab-pane">
+        <div id="healthContent"></div>
       </div>
 
       <!-- Backfill Tab -->
@@ -271,6 +283,14 @@
         <span class="nav-icon">🏃</span>
         <span>Activity</span>
       </button>
+      <button class="mobile-nav-btn" data-tab="body" data-testid="tab-body" onclick="switchTab('body')">
+        <span class="nav-icon">⚖️</span>
+        <span>Body</span>
+      </button>
+      <button class="mobile-nav-btn" data-tab="health" data-testid="tab-health" onclick="switchTab('health')">
+        <span class="nav-icon">🩺</span>
+        <span>Health</span>
+      </button>
       <button class="mobile-nav-btn" data-tab="backfill" onclick="switchTab('backfill')">
         <span class="nav-icon">⏳</span>
         <span>Repair</span>
@@ -302,6 +322,7 @@
 </body>
 
 </html>
+
 
 
 
