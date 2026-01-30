@@ -383,6 +383,8 @@ async function main() {
   // Full range export selected period
   const fromRange = '2024-01-01';
   const toRange = '2026-01-29';
+  await page.locator('[data-testid="period-custom"]').click({ timeout: 5000 }).catch(() => {});
+  await page.waitForSelector('#customFromDate', { state: 'visible', timeout: 5000 }).catch(() => {});
   await page.locator('#customFromDate').fill(fromRange);
   await page.locator('#customToDate').fill(toRange);
   await page.locator('#customRangeApply').click();
