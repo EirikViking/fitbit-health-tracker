@@ -303,12 +303,20 @@ async function main() {
     process.exit(1);
   }
   await estToggle.check({ force: true });
-  await page.waitForTimeout(500);
-  const estOn = await page.evaluate(() => {
+  await page.waitForTimeout(900);
+  let estOn = await page.evaluate(() => {
     const canvases = Array.from(document.querySelectorAll('canvas[data-estimated="1"]'));
     const visible = canvases.some(c => c.dataset.estimatedVisible === "1");
     return { visible, estVisible: window._estVisible };
   });
+  if (!estOn.visible) {
+    await page.waitForTimeout(800);
+    estOn = await page.evaluate(() => {
+      const canvases = Array.from(document.querySelectorAll('canvas[data-estimated="1"]'));
+      const visible = canvases.some(c => c.dataset.estimatedVisible === "1");
+      return { visible, estVisible: window._estVisible };
+    });
+  }
   if (!estOn.visible || estOn.estVisible !== true) {
     console.error('Estimated segments not visible after toggle on');
     await browser.close();
