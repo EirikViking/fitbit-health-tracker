@@ -2164,6 +2164,72 @@ async function fetchFitbitJSON(env: Env, path: string): Promise<{ ok: boolean, s
     return { ok: true, status: 200, data };
 }
 
+// --- Feature capability cache helpers ---
+
+type FeatureSupportRow = {
+    feature: string;
+    supported: number;
+    lastStatus?: number | null;
+    lastChecked?: string | null;
+    note?: string | null;
+};
+
+async function featureSupportGet(env: Env, feature: string): Promise<FeatureSupportRow | null> {
+    const row = await env.FITBIT_DB.prepare("SELECT feature, supported, lastStatus, lastChecked, note FROM feature_support WHERE feature = ?").bind(feature).first();
+    return row as any || null;
+}
+
+async function featureSupportSet(env: Env, feature: string, supported: boolean, status?: number | null, note?: string | null): Promise<void> {
+    const now = new Date().toISOString();
+    await env.FITBIT_DB.prepare(`
+        INSERT INTO feature_support (feature, supported, lastStatus, lastChecked, note)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(feature) DO UPDATE SET
+            supported = excluded.supported,
+            lastStatus = excluded.lastStatus,
+            lastChecked = excluded.lastChecked,
+            note = excluded.note
+    `).bind(feature, supported ? 1 : 0, status ?? null, now, note ?? null).run();
+}
+
+function shouldRecheckFeature(row: FeatureSupportRow | null): boolean {
+    if (!row || !row.lastChecked) return true;
+    const last = new Date(row.lastChecked).getTime();
+    if (isNaN(last)) return true;
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    return Date.now() - last > sevenDays;
+}
+
+async function tryFetchFeature<T>(
+    env: Env,
+    feature: string,
+    path: string,
+    parseFn: (json: any) => T | null
+): Promise<T | null> {
+    const cached = await featureSupportGet(env, feature);
+    if (cached && cached.supported === 0 && !shouldRecheckFeature(cached)) {
+        return null;
+    }
+
+    const res = await fetchFitbitJSON(env, path);
+    if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+            await featureSupportSet(env, feature, false, res.status, "scope or auth");
+            return null;
+        }
+        if (res.status === 404) {
+            await featureSupportSet(env, feature, false, res.status, "not available");
+            return null;
+        }
+        // Other errors: keep previous support state
+        return null;
+    }
+
+    const parsed = parseFn(res.data);
+    await featureSupportSet(env, feature, true, res.status, null);
+    return parsed;
+}
+
 function jsonResponse(env: Env, data: any, status = 200) {
     return new Response(JSON.stringify(data), {
         status: status,
