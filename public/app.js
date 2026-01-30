@@ -2450,8 +2450,6 @@ function renderActivityTab(data) {
     const cals = dailyRows.reduce((sum, r) => sum + (safeNumber(r.caloriesOut) || 0), 0);
     const azm = dailyRows.reduce((sum, r) => sum + (safeNumber(r.azm) || 0), 0);
     const azmNonNull = dailyRows.filter(r => safeNumber(r.azm) !== null);
-    const azmDays = azmNonNull.length;
-    const azmHasData = azmNonNull.some(r => safeNumber(r.azm) > 0);
     const hasSignals = steps > 0 || cals > 0;
 
     // Coverage
@@ -2481,7 +2479,6 @@ function renderActivityTab(data) {
         }
     }
 
-    const hasAzm = (azmDays || 0) > 0;
     container.innerHTML = `
         <div class="kpi-card">
             <div style="display:flex;justify-content:space-between;">
@@ -2500,24 +2497,7 @@ function renderActivityTab(data) {
             ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(cals / count).toLocaleString()}/day</div>` : ''}
             ${createTooltip('calories')}
         </div>
-        ${azmHasData || !hasSignals ? `
-        <div class="kpi-card">
-            <div class="kpi-title">Active Mins</div>
-            <div class="kpi-value">${azm}</div>
-            <div class="text-sm">Period Total (${periodLabel})</div>
-            ${count > 1 ? `<div class="text-xs text-secondary">Avg: ${Math.round(azm / count)}/day</div>` : ''}
-            ${createTooltip('azm')}
-        </div>` : `
-        <div class="kpi-card">
-            <div class="kpi-title">Active Mins</div>
-            <div class="kpi-value">Not supported by Fitbit Web API for this account</div>
-            <div class="text-sm">Period Total (${periodLabel})</div>
-            ${createTooltip('azm')}
-        </div>`}
         ${highlightsHtml}
-        <div style="grid-column:1/-1">
-           ${repairHtml}
-        </div>
     `;
     bindRepairBtn();
 
