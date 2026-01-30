@@ -402,7 +402,7 @@ async function main() {
   }
 
   // AI bundle export shape
-  const aiResp = await page.request.get('/api/export/ai');
+  const aiResp = await page.request.get(`${BASE_URL}/api/export/ai`);
   if (aiResp.status() !== 200) {
     console.error('AI export failed', aiResp.status());
     await browser.close();
