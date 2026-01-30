@@ -168,6 +168,16 @@ function daysBetweenInclusive(startISO, endISO) {
     return Math.floor((endUTC - startUTC) / 86400000) + 1;
 }
 
+function daysBetween(startISO, endISO) {
+    if (!startISO || !endISO) return null;
+    const startUTC = parseISOToUTC(startISO);
+    const endUTC = parseISOToUTC(endISO);
+    if (isNaN(startUTC) || isNaN(endUTC)) return null;
+    return Math.floor((endUTC - startUTC) / 86400000);
+}
+
+const Daysbetween = daysBetween; // compatibility alias
+
 function getDaysSinceYearStartOslo() {
     const end = getOsloTodayISO();
     const start = `${end.slice(0, 4)}-01-01`;
@@ -1281,7 +1291,7 @@ async function loadDashboard() {
         const data = await histRes.json();
 
         // Fetch body/health/features in parallel (non-blocking for UI)
-        const rangeDays = currentRange === 'all' ? 90 : (rangeStartDate && rangeEndDate ? daysBetween(rangeStartDate, rangeEndDate) + 1 : 30);
+    const rangeDays = currentRange === 'all' ? 90 : (rangeStartDate && rangeEndDate ? daysBetweenInclusive(rangeStartDate, rangeEndDate) : 30);
         const bodyPromise = fetch(`/api/body?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : null).catch(() => null);
         const healthPromise = fetch(`/api/health?from=${rangeStartDate || addDaysISO(getOsloTodayISO(), -(rangeDays - 1))}&to=${rangeEndDate || getOsloTodayISO()}`).then(r => r.ok ? r.json() : null).catch(() => null);
         const featuresPromise = fetch(`/api/features`).then(r => r.ok ? r.json() : null).catch(() => null);
